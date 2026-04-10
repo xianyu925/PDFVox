@@ -9,11 +9,11 @@ except ImportError:
     pass
 
 
-class LegacySettings:
+class Settings:
     API_KEY: str = os.getenv("API_KEY", "")
-    DEFAULT_PDF_PATH: str = os.getenv("DEFAULT_PDF_PATH", "example.pdf")
-    DEFAULT_OUTPUT_DIR: str = os.getenv("DEFAULT_OUTPUT_DIR", "output")
     STORAGE_PATH: str = os.getenv("STORAGE_PATH", "output")
+    ALLOWED_EXTENSIONS: tuple = (".pdf",)
+    MODEL_ENDPOINT: str = os.getenv("MODEL_ENDPOINT", "")
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", 8000))
     AUTO_RELOAD: bool = os.getenv("AUTO_RELOAD", "False").lower() in (
@@ -23,9 +23,4 @@ class LegacySettings:
     )
 
 
-settings = LegacySettings()
-
-# 兼容旧代码导出变量
-API_KEY = settings.API_KEY
-DEFAULT_PDF_PATH = settings.DEFAULT_PDF_PATH
-DEFAULT_OUTPUT_DIR = settings.DEFAULT_OUTPUT_DIR
+settings = Settings()

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDFVox Web</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 0 16px;
+        }
+
+        .card {
+            border: 1px solid #ddd;
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+
+        button {
+            padding: 8px 14px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>PDFVox Web</h1>
+    <div class="card">
+        <h2>上传 PDF</h2>
+        <input type="file" id="pdf-file" accept="application/pdf" />
+        <button id="upload-btn">上传</button>
+        <div id="upload-result"></div>
+    </div>
+
+    <div class="card">
+        <h2>快速启动</h2>
+        <p>上传成功后打开：<a id="viewer-link" href="#">查看讲解页面</a></p>
+    </div>
+
+    <script>
+        const uploadBtn = document.getElementById('upload-btn');
+        const fileInput = document.getElementById('pdf-file');
+        const result = document.getElementById('upload-result');
+        const viewerLink = document.getElementById('viewer-link');
+
+        uploadBtn.addEventListener('click', async () => {
+            if (!fileInput.files.length) {
+                result.textContent = '请先选择 PDF 文件。';
+                return;
+            }
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            result.textContent = '上传中...';
+            try {
+                const resp = await fetch('/upload/', { method: 'POST', body: formData });
+                if (!resp.ok) throw new Error(await resp.text());
+                const data = await resp.json();
+                result.innerHTML = `上传成功: ${data.filename} (ID: ${data.file_id})`;
+                viewerLink.href = `/viewer.html?file_id=${data.file_id}`;
+                viewerLink.textContent = `进入讲解页面（${data.file_id}）`;
+            } catch (error) {
+                result.textContent = `上传失败: ${error}`;
+            }
+        });
+    </script>
+</body>
+
+</html>
