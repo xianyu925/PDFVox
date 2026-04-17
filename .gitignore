@@ -1,5 +1,8 @@
-/.vscode
+.vscode/
 /example.pdf
 /output
-/__pycache__
 /.env
+/test_merge_audio.py
+__pycache__/
+*.py[cod]
+*$py.class

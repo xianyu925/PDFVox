@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDFVox Viewer</title>
+    <style>
+        :root {
+            --primary-color: #4f46e5;
+            --primary-hover: #4338ca;
+            --bg-body: #f1f5f9;
+            --bg-surface: #ffffff;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --border-color: #e2e8f0;
+            --danger: #ef4444;
+            --success: #10b981;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-body);
+            height: 100vh;
+            display: flex;
+            padding: 16px;
+            overflow: hidden;
+            gap: 16px;
+        }
+
+        /* 左侧控制面板 */
+        .left-panel {
+            width: 340px;
+            background-color: var(--bg-surface);
+            border-radius: 20px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+
+        /* 滚动条美化 */
+        .left-panel::-webkit-scrollbar,
+        .pdf-container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .left-panel::-webkit-scrollbar-track,
+        .pdf-container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .left-panel::-webkit-scrollbar-thumb,
+        .pdf-container::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 10px;
+        }
+
+        .logo {
+            font-size: 32px;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary-color), #9333ea);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-align: center;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+        }
+
+        /* 输入框区域 */
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        label {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .required {
+            color: var(--danger);
+        }
+
+        input[type="text"] {
+            padding: 12px 16px;
+            border: 2px solid var(--border-color);
+            border-radius: 12px;
+            font-size: 14px;
+            transition: all 0.3s;
+            outline: none;
+            background-color: #f8fafc;
+            color: var(--text-main);
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--primary-color);
+            background-color: #ffffff;
+            box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.1);
+        }
+
+        /* 按钮样式 */
+        button {
+            padding: 14px 20px;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 15px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+
+        #explain-all-btn {
+            background: linear-gradient(135deg, var(--primary-color), #6366f1);
+            color: white;
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
+        }
+
+        #explain-all-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(79, 70, 229, 0.35);
+        }
+
+        button:disabled {
+            background: #e2e8f0;
+            color: #94a3b8;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        /* 音频模块区域 */
+        .merged-audio-container {
+            background-color: #f8fafc;
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 20px;
+            margin-top: 10px;
+        }
+
+        .merged-audio-container h4 {
+            color: var(--text-main);
+            font-size: 16px;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .merged-audio-container p {
+            font-size: 13px;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+
+        /* 动态生成的音频卡片样式 */
+        .audio-item-card {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 12px;
+            margin-top: 12px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+        }
+
+        .audio-item-card span {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--primary-color);
+            margin-bottom: 8px;
+        }
+
+        /* 右侧 PDF 预览面板 */
+        .right-panel {
+            flex: 1;
+            background-color: #e2e8f0;
+            border-radius: 20px;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.02);
+        }
+
+        .pdf-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 32px;
+            scroll-behavior: smooth;
+        }
+
+        #pdf-preview {
+            width: 100%;
+            max-width: 900px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 24px;
+            /* 页面之间的间距 */
+        }
+
+        .pdf-page-wrapper {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+            overflow: hidden;
+            width: 100%;
+        }
+
+        .pdf-page-wrapper img {
+            width: 100%;
+            display: block;
+            height: auto;
+        }
+
+        /* 悬浮页码计数器 - 现代胶囊设计 */
+        .page-counter {
+            position: absolute;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            padding: 8px 20px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 600;
+            color: white;
+            letter-spacing: 1px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
+            z-index: 10;
+        }
+
+        /* 隐藏原始设计中不需要的元素但保留结构防报错 */
+        .page-controls,
+        .audio-container {
+            display: none !important;
+        }
+
+        #hidden-dummies {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- 防报错隐藏区域（保留原 JS 引用的 ID 但界面不需要展示的元素） -->
+    <div id="hidden-dummies">
+        <button id="prev-btn"></button>
+        <button id="next-btn"></button>
+        <button id="explain-btn"></button>
+        <div id="page-info"></div>
+        <div id="explanation"></div>
+        <div id="audio-player"></div>
+    </div>
+
+    <div class="left-panel">
+        <div class="logo">PDFVox</div>
+
+        <div class="input-group">
+            <label for="course-name">课程名称 <span class="required">*</span></label>
+            <input type="text" id="course-name" placeholder="为您的课程命名..." required />
+        </div>
+
+        <button id="explain-all-btn" disabled>一键生成全程讲解</button>
+
+        <div class="merged-audio-container" id="merged-audio-wrapper">
+            <h4>
+                <!-- 麦克风/音频图标 -->
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 18v-6a9 9 0 0 1 18 0v6"></path>
+                    <path
+                        d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z">
+                    </path>
+                </svg>
+                讲解音频
+            </h4>
+            <div id="merged-audio-player">
+                <p>配置完成并点击上方按钮，系统将自动合并生成智能语音讲解。</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右侧面板 -->
+    <div class="right-panel">
+        <div class="pdf-container" id="pdf-container">
+            <div id="pdf-preview">
+                <div style="color: #64748b; margin-top: 100px; font-weight: 500;">正在加载 PDF 文档...</div>
+            </div>
+        </div>
+        <div class="page-counter" id="page-counter">1 / 0</div>
+
+        <!-- 保持原结构兼容JS -->
+        <div class="audio-container">
+            <div id="audio-player-container"></div>
+        </div>
+    </div>
+
+    <script>
+        const courseNameInput = document.getElementById('course-name');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+        const explainBtn = document.getElementById('explain-btn');
+        const explainAllBtn = document.getElementById('explain-all-btn');
+        const pageInfo = document.getElementById('page-info');
+        const pdfPreview = document.getElementById('pdf-preview');
+        const explanationDiv = document.getElementById('explanation');
+        const audioPlayer = document.getElementById('audio-player');
+
+        let currentPage = 1;
+        let totalPages = 0;
+
+        function getQueryParam(name) {
+            const params = new URLSearchParams(window.location.search);
+            return params.get(name) || "";
+        }
+
+        function updateButtons() {
+            explainAllBtn.disabled = totalPages <= 0;
+        }
+
+        function updatePageCounter() {
+            document.getElementById('page-counter').textContent = `${currentPage} / ${totalPages}`;
+        }
+
+        function detectCurrentPage() {
+            const container = document.getElementById('pdf-container');
+            const pageElements = pdfPreview.children;
+
+            if (pageElements.length === 0) return;
+
+            const containerTop = container.scrollTop;
+            const containerHeight = container.clientHeight;
+
+            for (let i = 0; i < pageElements.length; i++) {
+                const page = pageElements[i];
+                const pageTop = page.offsetTop;
+                const pageHeight = page.offsetHeight;
+
+                if (pageTop <= containerTop + containerHeight / 2 && pageTop + pageHeight > containerTop + containerHeight / 2) {
+                    currentPage = i + 1;
+                    updatePageCounter();
+                    break;
+                }
+            }
+        }
+
+        async function loadEntirePDF() {
+            const fileId = getQueryParam('file_id');
+            if (!fileId) {
+                alert('File ID 未找到，请从上传页面进入。');
+                return;
+            }
+
+            try {
+                // 获取PDF总页数
+                const infoResp = await fetch(`/pdf/${fileId}`);
+                if (!infoResp.ok) {
+                    throw new Error('无法获取PDF信息');
+                }
+                const infoData = await infoResp.json();
+                const pages = infoData.pages;
+                totalPages = pages.length;
+
+                // 加载所有页面 - 这里优化了注入的HTML结构，适应新版UI
+                let html = '';
+                for (let page of pages) {
+                    const pageResp = await fetch(`/pdf/${fileId}/page/${page}`);
+                    if (!pageResp.ok) {
+                        continue;
+                    }
+                    const pageData = await pageResp.json();
+                    html += `
+                        <div class="pdf-page-wrapper" id="page-${page}">
+                            <img src="${pageData.image_url}" alt="第 ${page} 页" />
+                        </div>
+                    `;
+                }
+
+                pdfPreview.innerHTML = html;
+                currentPage = 1;
+                updatePageCounter();
+                updateButtons();
+
+                // 添加滚动事件监听器
+                const container = document.getElementById('pdf-container');
+                container.addEventListener('scroll', detectCurrentPage);
+            } catch (error) {
+                pdfPreview.innerHTML = `<div style="color: #ef4444; margin-top: 100px;">加载失败: ${error.message}</div>`;
+            }
+        }
+
+        const initialFileId = getQueryParam('file_id');
+        if (initialFileId) {
+            loadEntirePDF();
+        }
+
+        explainAllBtn.addEventListener('click', async () => {
+            const fileId = getQueryParam('file_id');
+            const courseName = courseNameInput.value.trim();
+
+            if (!fileId) {
+                alert('File ID 未找到，请从上传页面进入');
+                return;
+            }
+            if (!courseName) {
+                alert('请输入课程名称');
+                courseNameInput.focus();
+                return;
+            }
+
+            // 按钮状态改为加载中
+            const originalText = explainAllBtn.textContent;
+            explainAllBtn.textContent = '🚀 正在生成语音讲解，请稍候...';
+            explainAllBtn.disabled = true;
+
+            try {
+                const requestData = {
+                    file_id: fileId,
+                    course_name: courseName
+                };
+
+                const resp = await fetch('/explain/all', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify(requestData),
+                });
+
+                let responseData;
+                try {
+                    responseData = await resp.json();
+                } catch (e) {
+                    responseData = null;
+                }
+
+                if (!resp.ok) {
+                    throw new Error(`批量讲解生成失败: 状态 ${resp.status}`);
+                }
+
+                const successCount = Object.values(responseData).filter(item => !item.error).length;
+                const totalCount = Object.keys(responseData).filter(k => k !== 'merged_audio_url').length;
+
+                alert(`✨ 批量讲解生成完成！成功生成 ${successCount}/${totalCount} 页讲解。`);
+
+                // 更新合并音频播放器
+                updateMergedAudioPlayer(fileId, responseData);
+            } catch (error) {
+                console.error('批量讲解生成错误:', error);
+                alert(`批量讲解生成失败: ${error.message}`);
+            } finally {
+                // 恢复按钮状态
+                explainAllBtn.textContent = originalText;
+                explainAllBtn.disabled = false;
+            }
+        });
+
+        // 优化注入的音频播放器 UI 结构
+        function updateMergedAudioPlayer(fileId, responseData) {
+            const mergedAudioPlayer = document.getElementById('merged-audio-player');
+
+            if (responseData.merged_audio_url) {
+                let html = `
+                    <div class="audio-item-card" style="border-color: var(--primary-color); background: #fefeff;">
+                        <span style="color: var(--primary-color);">🌟 完整课程讲解</span>
+                        <audio controls style="width: 100%; height: 40px; outline: none;">
+                            <source src="${responseData.merged_audio_url}" type="audio/mpeg">
+                            您的浏览器不支持音频播放。
+                        </audio>
+                    </div>
+                `;
+
+                html += '<div style="margin-top: 16px; font-size: 13px; font-weight: 600; color: var(--text-muted);">各页面分段音频</div>';
+
+                // 按页面顺序排序
+                const pages = Object.keys(responseData)
+                    .filter(key => key !== 'merged_audio_url')
+                    .sort((a, b) => parseInt(a) - parseInt(b));
+
+                pages.forEach(page => {
+                    const result = responseData[page];
+                    if (result.audio_url) {
+                        html += `
+                            <div class="audio-item-card">
+                                <span style="color: var(--text-main);">第 ${page} 页</span>
+                                <audio controls style="width: 100%; height: 36px; outline: none;">
+                                    <source src="${result.audio_url}" type="audio/mpeg">
+                                    您的浏览器不支持音频播放。
+                                </audio>
+                            </div>
+                        `;
+                    }
+                });
+
+                mergedAudioPlayer.innerHTML = html;
+            } else {
+                mergedAudioPlayer.innerHTML = '<p style="color: #ef4444;">合并音频生成失败，请重试</p>';
+            }
+        }
+    </script>
+</body>
+
+</html>

@@ -11,7 +11,10 @@ except ImportError:
 
 class Settings:
     API_KEY: str = os.getenv("API_KEY", "")
-    STORAGE_PATH: str = os.getenv("STORAGE_PATH", "output")
+    ACCESS_TOKEN: str = os.getenv("ACCESS_TOKEN", "")
+    API_APP_KEY: str = os.getenv("API_APP_KEY", "")
+    TTS_VOICE: str = os.getenv("TTS_VOICE", "")
+    STORAGE_PATH: str = "output"
     ALLOWED_EXTENSIONS: tuple = (".pdf",)
     MODEL_ENDPOINT: str = os.getenv("MODEL_ENDPOINT", "")
     HOST: str = os.getenv("HOST", "0.0.0.0")
@@ -21,6 +24,7 @@ class Settings:
         "true",
         "yes",
     )
+    ENABLE_LOGGING: bool = False
 
 
 settings = Settings()

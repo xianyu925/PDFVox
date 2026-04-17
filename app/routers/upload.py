@@ -1,3 +1,6 @@
+import logging
+from app.config import settings
+
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pathlib import Path
 import uuid
@@ -5,6 +8,19 @@ import uuid
 from app.config import settings
 from app.models.schemas import UploadResponse
 from app.models.db import save_upload
+
+# 配置日志
+if settings.ENABLE_LOGGING:
+    logging.basicConfig(
+        level=logging.DEBUG,  # 设置为DEBUG以显示所有日志
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger = logging.getLogger(__name__)
+else:
+    # 只显示错误日志
+    logging.basicConfig(level=logging.ERROR)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.ERROR)
 
 router = APIRouter()
 

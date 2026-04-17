@@ -16,7 +16,7 @@ class PageInfo(BaseModel):
 
 class ExplainRequest(BaseModel):
     file_id: str
-    page: int
+    page: Optional[int] = None
     auto_next: Optional[bool] = False
     course_name: Optional[str] = "机器学习导论"
 
@@ -26,7 +26,6 @@ class ExplainResponse(BaseModel):
     file_id: str
     page: int
     explanation: str
-    transition: Optional[str]
     combined_text: Optional[str]
     audio_url: Optional[str]
 

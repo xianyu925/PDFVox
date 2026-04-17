@@ -1,8 +1,29 @@
+import logging
+from app.config import settings
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
+
+# 确保数据库初始化
+from app.models.db import init_db
+
+init_db()
 from app.models.db import get_upload
 from app.models.schemas import PageInfo
 from app.services.pdf_service import PDFService
+
+# 配置日志
+if settings.ENABLE_LOGGING:
+    logging.basicConfig(
+        level=logging.DEBUG,  # 设置为DEBUG以显示所有日志
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logger = logging.getLogger(__name__)
+else:
+    # 只显示错误日志
+    logging.basicConfig(level=logging.ERROR)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.ERROR)
 
 router = APIRouter()
 service = PDFService()
@@ -39,4 +60,3 @@ def get_pdf_page(file_id: str, page: int):
         return PageInfo(page=page, text=text, image_url=image_url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-

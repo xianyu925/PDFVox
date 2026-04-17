@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDFVox - 任务状态查询</title>
+    <style>
+        :root {
+            --primary-color: #4f46e5;
+            --primary-hover: #4338ca;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --border-color: #e2e8f0;
+            --info-bg: #f1f5f9;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--bg-color);
+            background-image: radial-gradient(circle at top right, #e0e7ff 0%, transparent 40%),
+                radial-gradient(circle at bottom left, #f3e8ff 0%, transparent 40%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            width: 100%;
+            max-width: 480px;
+            padding: 40px;
+            border-radius: 24px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.05);
+            animation: fadeInUp 0.6s ease-out;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+
+        .logo {
+            font-size: 32px;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary-color), #9333ea);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+
+        .subtitle {
+            font-size: 15px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid var(--border-color);
+            border-radius: 12px;
+            font-size: 14px;
+            color: var(--text-main);
+            background-color: #f8fafc;
+            transition: all 0.3s ease;
+            outline: none;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--primary-color);
+            background-color: #ffffff;
+            box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.1);
+        }
+
+        button {
+            padding: 0 24px;
+            background: linear-gradient(135deg, var(--primary-color), #6366f1);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.2);
+            white-space: nowrap;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(79, 70, 229, 0.3);
+            background: linear-gradient(135deg, var(--primary-hover), #4f46e5);
+        }
+
+        #task-status {
+            background-color: var(--info-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            min-height: 140px;
+            color: var(--text-muted);
+            font-size: 14px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 13px;
+            margin-top: 4px;
+            letter-spacing: 0.5px;
+        }
+
+        .status-badge.processing {
+            background-color: #e0e7ff;
+            color: var(--primary-color);
+        }
+
+        .status-item {
+            margin-bottom: 16px;
+        }
+
+        .status-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .status-label {
+            font-size: 12px;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .status-value {
+            color: var(--text-main);
+            font-weight: 500;
+            font-size: 15px;
+            line-height: 1.5;
+            word-break: break-all;
+        }
+
+        /* 动画 */
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <div class="header">
+            <div class="logo">PDFVox</div>
+            <div class="subtitle">任务状态查询中心</div>
+        </div>
+
+        <div class="input-group">
+            <div class="input-wrapper">
+                <!-- 占位符修改为更友好的提示 -->
+                <input type="text" id="task-id" placeholder="在此输入您的 Task ID..." autocomplete="off" />
+            </div>
+            <button id="check-btn">
+                <!-- 搜索/查询图标 -->
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                查询
+            </button>
+        </div>
+
+        <!-- 默认状态 -->
+        <div id="task-status">
+            <div style="text-align: center;">
+                <svg style="color: #cbd5e1; margin-bottom: 12px;" width="32" height="32" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <polyline points="12 6 12 12 16 14"></polyline>
+                </svg><br />
+                请输入 Task ID 后点击查询
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const taskIdInput = document.getElementById('task-id');
+        const checkBtn = document.getElementById('check-btn');
+        const statusDiv = document.getElementById('task-status');
+
+        checkBtn.addEventListener('click', async () => {
+            const task_id = taskIdInput.value.trim();
+            if (!task_id) {
+                // UI优化：空的提示
+                statusDiv.innerHTML = `
+                    <div style="color: #ef4444; text-align: center; font-weight: 500;">
+                        ⚠️ 请输入有效的 Task ID
+                    </div>`;
+                taskIdInput.focus();
+                return;
+            }
+
+            // UI优化：加载态（带旋转动画）
+            statusDiv.innerHTML = `
+                <div style="text-align: center; color: var(--primary-color); font-weight: 500;">
+                    <svg style="animation: spin 1s linear infinite; margin-bottom: 8px;" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10" stroke-opacity="0.25"></circle>
+                        <path d="M4 12a8 8 0 018-8v8H4z"></path>
+                    </svg><br/>
+                    正在连接服务器查询...
+                </div>
+                <style>@keyframes spin { 100% { transform: rotate(360deg); } }</style>
+            `;
+
+            try {
+                const resp = await fetch(`/explain/status/${task_id}`);
+                if (!resp.ok) throw new Error(await resp.text());
+                const data = await resp.json();
+
+                // UI优化：将文本转为漂亮的结构化卡片展示 (保持数据逻辑一致)
+                statusDiv.innerHTML = `
+                    <div class="status-item">
+                        <div class="status-label">当前状态 (Status)</div>
+                        <div class="status-badge processing">${data.status}</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">详情信息 (Detail)</div>
+                        <div class="status-value">${data.detail || '暂无进一步的详情说明'}</div>
+                    </div>
+                `;
+            } catch (error) {
+                // UI优化：错误状态
+                statusDiv.innerHTML = `
+                    <div style="color: #ef4444;">
+                        <div style="font-weight: bold; margin-bottom: 8px;">❌ 查询出错</div>
+                        <div style="font-size: 13px;">${error.message || error}</div>
+                    </div>
+                `;
+            }
+        });
+
+        // 附加体验优化：按回车键触发查询
+        taskIdInput.addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                checkBtn.click();
+            }
+        });
+    </script>
+</body>
+
+</html>

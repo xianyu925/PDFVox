@@ -4,6 +4,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import settings
+
+# 确保数据库初始化
+from app.models.db import init_db
+
+init_db()
 from app.routers import upload, pdf_view, ai_explain, audio
 
 app = FastAPI(title="PDFVox Web")
@@ -16,9 +21,9 @@ app.include_router(audio.router, prefix="/audio", tags=["audio"])
 Path(settings.STORAGE_PATH).mkdir(parents=True, exist_ok=True)
 Path("output").mkdir(parents=True, exist_ok=True)
 
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
-templates = Jinja2Templates(directory="app/templates")
+templates = Jinja2Templates(directory="web")
 
 
 @app.get("/")

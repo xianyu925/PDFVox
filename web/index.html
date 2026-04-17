@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDFVox Web</title>
+    <style>
+        :root {
+            --primary-color: #4f46e5;
+            --primary-hover: #4338ca;
+            --secondary-color: #f3f4f6;
+            --text-main: #1f2937;
+            --text-muted: #6b7280;
+            --success-color: #10b981;
+            --bg-color: #f8fafc;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--bg-color);
+            background-image: radial-gradient(circle at top right, #e0e7ff 0%, transparent 40%),
+                radial-gradient(circle at bottom left, #f3e8ff 0%, transparent 40%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+            animation: fadeInDown 0.8s ease-out;
+        }
+
+        .logo {
+            font-size: 56px;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary-color), #9333ea);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            font-size: 18px;
+            color: var(--text-muted);
+            font-weight: 500;
+            letter-spacing: 1px;
+        }
+
+        .card {
+            background-color: white;
+            width: 100%;
+            max-width: 500px;
+            padding: 40px;
+            border-radius: 24px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.05);
+            animation: fadeInUp 0.8s ease-out;
+        }
+
+        .upload-area {
+            border: 2px dashed #cbd5e1;
+            border-radius: 16px;
+            padding: 40px 20px;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            background-color: #f8fafc;
+            margin-bottom: 24px;
+        }
+
+        .upload-area:hover {
+            border-color: var(--primary-color);
+            background-color: #eff6ff;
+        }
+
+        .upload-icon {
+            width: 48px;
+            height: 48px;
+            fill: var(--primary-color);
+            margin-bottom: 16px;
+            opacity: 0.8;
+        }
+
+        .upload-text {
+            color: var(--text-main);
+            font-weight: 600;
+            font-size: 16px;
+            margin-bottom: 8px;
+        }
+
+        .upload-subtext {
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        .file-name-display {
+            margin-top: 15px;
+            font-size: 14px;
+            color: var(--primary-color);
+            font-weight: 600;
+            word-break: break-all;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 24px;
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-decoration: none;
+        }
+
+        .upload-btn {
+            background: var(--primary-color);
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.2);
+        }
+
+        .upload-btn:hover {
+            background: var(--primary-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(79, 70, 229, 0.3);
+        }
+
+        .viewer-btn {
+            background: linear-gradient(135deg, #10b981, #059669);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);
+            margin-top: 16px;
+        }
+
+        .viewer-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(16, 185, 129, 0.3);
+        }
+
+        #upload-result {
+            margin-top: 20px;
+            padding: 16px;
+            border-radius: 12px;
+            background-color: var(--secondary-color);
+            color: var(--text-main);
+            font-size: 14px;
+            text-align: center;
+            display: none;
+            /* 默认隐藏，有内容时显示 */
+            font-weight: 500;
+        }
+
+        #viewer-btn-container {
+            display: none;
+            flex-direction: column;
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        /* 简单的入场动画 */
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+
+            to {
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <div class="logo">PDFVox</div>
+        <div class="subtitle">智能 PDF 语音讲解系统</div>
+    </div>
+
+    <div class="card">
+        <!-- 将上传区域用 label 包裹，点击整个区域即可触发选择文件 -->
+        <label for="pdf-file" class="upload-area" id="drop-zone">
+            <!-- PDF 矢量图标 -->
+            <svg class="upload-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path
+                    d="M8.267 14.68c-.184 0-.308.018-.372.036v1.178c.076.018.171.023.302.023.479 0 .774-.242.774-.651 0-.366-.254-.586-.704-.586zm3.487.012c-.2 0-.33.018-.407.036v2.61c.077.018.201.018.313.018.817.006 1.349-.444 1.349-1.396.006-.83-.479-1.268-1.255-1.268z" />
+                <path
+                    d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM9.498 16.19c-.309.29-.765.42-1.296.42a2.23 2.23 0 0 1-.308-.018v1.426H7v-3.936A7.558 7.558 0 0 1 8.219 14c.557 0 .953.106 1.22.319.254.202.426.533.426.923-.001.392-.131.723-.367.948zm3.807 1.355c-.42.349-1.059.515-1.84.515-.468 0-.799-.03-1.024-.06v-3.917A7.947 7.947 0 0 1 11.66 14c.757 0 1.249.136 1.527.426.313.314.467.805.467 1.409 0 .61-.177 1.13-.549 1.71zm4.164-3.26h-1.55v1.154h1.16v.776h-1.16v1.758h-.876V14h2.426v.285z" />
+                <path d="M13 9V3.5L18.5 9H13z" />
+            </svg>
+            <div class="upload-text">点击选择 PDF 文件</div>
+            <div class="upload-subtext">支持最大 50MB 的 PDF 文档</div>
+            <div class="file-name-display" id="file-name"></div>
+        </label>
+
+        <input type="file" id="pdf-file" accept="application/pdf" />
+
+        <button id="upload-btn" class="btn upload-btn">
+            开始上传并解析
+        </button>
+
+        <div id="upload-result"></div>
+
+        <div id="viewer-btn-container">
+            <a id="viewer-link" href="#" class="btn viewer-btn">
+                <!-- 播放图标 -->
+                <svg style="width: 20px; height: 20px; margin-right: 8px; fill: currentColor;" viewBox="0 0 24 24">
+                    <path d="M8 5v14l11-7z" />
+                </svg>
+                进入讲解页面
+            </a>
+        </div>
+    </div>
+
+    <script>
+        const uploadBtn = document.getElementById('upload-btn');
+        const fileInput = document.getElementById('pdf-file');
+        const fileNameDisplay = document.getElementById('file-name');
+        const result = document.getElementById('upload-result');
+        const viewerLink = document.getElementById('viewer-link');
+        const viewerBtnContainer = document.getElementById('viewer-btn-container');
+
+        // UX 优化：选中文件后显示文件名
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                fileNameDisplay.textContent = '已选择: ' + e.target.files[0].name;
+            } else {
+                fileNameDisplay.textContent = '';
+            }
+        });
+
+        uploadBtn.addEventListener('click', async () => {
+            if (!fileInput.files.length) {
+                result.style.display = 'block';
+                result.style.backgroundColor = '#fee2e2';
+                result.style.color = '#b91c1c';
+                result.textContent = '请先点击虚线框选择 PDF 文件';
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // 恢复默认提示样式
+            result.style.display = 'block';
+            result.style.backgroundColor = '#eff6ff';
+            result.style.color = '#1d4ed8';
+            result.innerHTML = `
+                <div style="display:flex; align-items:center; justify-content:center; gap:8px;">
+                    <svg class="animate-spin" style="animation: spin 1s linear infinite; width:16px; height:16px;" viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" stroke-opacity="0.25"></circle>
+                        <path d="M4 12a8 8 0 018-8v8H4z" fill="currentColor"></path>
+                    </svg>
+                    上传解析中，请稍候...
+                </div>
+            `;
+
+            // 隐藏可能存在的上一次结果
+            viewerBtnContainer.style.display = 'none';
+
+            try {
+                const resp = await fetch('/upload/', { method: 'POST', body: formData });
+                if (!resp.ok) throw new Error(await resp.text());
+                const data = await resp.json();
+
+                // 成功样式
+                result.style.backgroundColor = '#d1fae5';
+                result.style.color = '#047857';
+                result.textContent = `上传成功: ${data.filename}`;
+
+                viewerLink.href = `/viewer.html?file_id=${data.file_id}`;
+                viewerBtnContainer.style.display = 'flex';
+            } catch (error) {
+                // 失败样式
+                result.style.backgroundColor = '#fee2e2';
+                result.style.color = '#b91c1c';
+                result.textContent = `上传失败: ${error.message || error}`;
+            }
+        });
+    </script>
+</body>
+
+</html>
