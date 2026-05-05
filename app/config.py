@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 try:
     from dotenv import load_dotenv
@@ -24,7 +23,7 @@ class Settings:
         "true",
         "yes",
     )
-    ENABLE_LOGGING: bool = False
+    ENABLE_LOGGING: bool = True
 
 
 settings = Settings()

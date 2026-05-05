@@ -1,14 +1,27 @@
 import logging
 from app.config import settings
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 
 # 配置日志
 if settings.ENABLE_LOGGING:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    # 创建文件处理器，将日志写入log.txt文件
+    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
+    file_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
+    file_handler.setFormatter(file_formatter)
+
+    # 创建控制台处理器
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    console_handler.setFormatter(console_formatter)
+
     logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 else:
     # 禁用日志
     logging.basicConfig(level=logging.CRITICAL)
@@ -21,6 +34,11 @@ class LLMService:
 
     def __init__(self):
         self.client = OpenAI(
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            api_key=settings.API_KEY,
+        )
+        # 【新增】专门为流式并发准备的异步客户端
+        self.async_client = AsyncOpenAI(
             base_url="https://ark.cn-beijing.volces.com/api/v3",
             api_key=settings.API_KEY,
         )
@@ -75,7 +93,7 @@ class LLMService:
             # 使用火山引擎API
             logger.info("正在调用火山引擎API")
             response = self.client.responses.create(
-                model="doubao-seed-1-8-251228",
+                model="doubao-seed-2-0-pro-260215",
                 input=input_messages,
             )
             logger.info("API调用成功")
@@ -83,34 +101,118 @@ class LLMService:
             # 提取响应内容
             explanation = ""
 
-            if hasattr(response, "output") and response.output:
-                logger.info(f"输出项数量: {len(response.output)}")
+            item = response.output[1]
+            if hasattr(item, "content") and isinstance(item.content, list):
+                for content_item in item.content:
+                    if hasattr(content_item, "text"):
+                        explanation += content_item.text
+                        logger.info(
+                            f"从content的text属性提取到文本: {content_item.text[:100]}..."
+                        )
 
-                # 只处理第二个output项（索引为1）
-                if len(response.output) >= 2:
-                    item = response.output[1]
-                    if hasattr(item, "content") and isinstance(item.content, list):
-                        for content_item in item.content:
-                            if hasattr(content_item, "text"):
-                                explanation += content_item.text
-                                logger.info(
-                                    f"从content的text属性提取到文本: {content_item.text[:100]}..."
-                                )
-
-                # 如果没有提取到内容，尝试处理第一个output项
-                if not explanation and len(response.output) > 0:
-                    item = response.output[0]
-                    if hasattr(item, "content") and isinstance(item.content, list):
-                        for content_item in item.content:
-                            if hasattr(content_item, "text"):
-                                explanation += content_item.text
-                                logger.info(
-                                    f"从第一个output的content属性提取到文本: {content_item.text[:100]}..."
-                                )
-
-                logger.info(f"最终提取响应内容，长度: {len(explanation)}")
+            logger.info(f"最终提取响应内容，长度: {len(explanation)}")
 
             return explanation.replace("\u0000", "")
         except Exception as e:
             logger.error(f"生成讲解失败: {str(e)}", exc_info=True)
             raise
+
+    async def stream_explanation(
+        self, system_prompt, user_prompt, page_num=1, image_base64=None, max_tokens=800
+    ):
+        """流式生成讲解，返回统一事件流 - 与TTS增量输入接口对齐"""
+        import time
+
+        try:
+            logger.info(f"开始流式生成讲解，页面: {page_num}")
+
+            # 发送开始事件
+            yield {
+                "type": "start",
+                "data": {"page": page_num, "stage": "llm"},
+                "page": page_num,
+                "ts": time.time(),
+            }
+
+            # OpenAI标准格式（用于流式API）
+            input_messages = []
+
+            # 添加系统提示
+            if system_prompt:
+                input_messages.append(
+                    {
+                        "role": "system",
+                        "content": system_prompt,
+                    }
+                )
+
+            # Add user prompt - handle both text-only and multimodal formats
+            if isinstance(user_prompt, list) and all(
+                isinstance(item, dict) for item in user_prompt
+            ):
+                # 转换为OpenAI标准格式
+                user_content = []
+                for item in user_prompt:
+                    if item.get("type") == "text":
+                        user_content.append({"type": "text", "text": item.get("text")})
+                    elif item.get("type") == "image_url":
+                        image_url = item.get("image_url", {}).get("url")
+                        user_content.append(
+                            {"type": "image_url", "image_url": {"url": image_url}}
+                        )
+                input_messages.append({"role": "user", "content": user_content})
+                logger.info("多模态输入已准备，包含文本和图像")
+            else:
+                # Text-only format
+                input_messages.append(
+                    {
+                        "role": "user",
+                        "content": user_prompt,
+                    }
+                )
+                logger.info("文本输入已准备")
+
+            # 使用OpenAI聊天补全接口（流式）
+            logger.info("正在调用OpenAI聊天补全API（流式）")
+            response = await self.async_client.chat.completions.create(
+                model="doubao-seed-1-8-251228",
+                messages=input_messages,
+                stream=True,  # 启用流式输出
+            )
+            logger.info("API调用成功，开始流式接收")
+
+            # 流式提取响应内容，返回统一事件
+            explanation = ""
+            async for chunk in response:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        content_piece = delta.content
+                        explanation += content_piece
+
+                        # 生成文本事件 - 与TTS增量输入对齐
+                        yield {
+                            "type": "text",
+                            "data": content_piece,
+                            "page": page_num,
+                            "ts": time.time(),
+                        }
+
+            # 发送结束事件
+            yield {
+                "type": "end",
+                "data": {"page": page_num, "stage": "llm", "length": len(explanation)},
+                "page": page_num,
+                "ts": time.time(),
+            }
+
+            logger.info(f"LLM流式生成完成，页面: {page_num}, 长度: {len(explanation)}")
+
+        except Exception as e:
+            logger.error(f"流式生成讲解失败: {str(e)}", exc_info=True)
+            yield {
+                "type": "error",
+                "data": {"error": str(e), "stage": "llm"},
+                "page": page_num,
+                "ts": time.time(),
+            }

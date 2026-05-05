@@ -9,7 +9,7 @@ from app.config import settings
 from app.models.db import init_db
 
 init_db()
-from app.routers import upload, pdf_view, ai_explain, audio
+from app.routers import upload, pdf_view, ai_explain, audio, asr, qa
 
 app = FastAPI(title="PDFVox Web")
 
@@ -17,6 +17,8 @@ app.include_router(upload.router, prefix="/upload", tags=["upload"])
 app.include_router(pdf_view.router, prefix="/pdf", tags=["pdf"])
 app.include_router(ai_explain.router, prefix="/explain", tags=["explain"])
 app.include_router(audio.router, prefix="/audio", tags=["audio"])
+app.include_router(asr.router, prefix="/asr", tags=["asr"])
+app.include_router(qa.router, prefix="/qa", tags=["qa"])
 
 Path(settings.STORAGE_PATH).mkdir(parents=True, exist_ok=True)
 Path("output").mkdir(parents=True, exist_ok=True)

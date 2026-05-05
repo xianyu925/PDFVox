@@ -1,9 +1,14 @@
 import asyncio
-import copy
 import json
 import logging
 import uuid
+import re
+import copy
 from pathlib import Path
+from typing import List
+import base64
+import socket
+import time
 
 import websockets
 
@@ -11,6 +16,7 @@ from app.config import settings
 from protocols import (
     EventType,
     MsgType,
+    MsgTypeFlagBits,
     start_connection,
     start_session,
     finish_session,
@@ -22,16 +28,26 @@ from protocols import (
 
 # 配置日志
 if settings.ENABLE_LOGGING:
-    logging.basicConfig(
-        level=logging.DEBUG,  # 设置为DEBUG以显示所有日志
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
+    file_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
+    file_handler.setFormatter(file_formatter)
+
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    console_handler.setFormatter(console_formatter)
+
     logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 else:
-    # 只显示错误日志
-    logging.basicConfig(level=logging.ERROR)
+    logging.basicConfig(level=logging.CRITICAL)
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.ERROR)
+    logger.setLevel(logging.CRITICAL)
 
 
 class TTSService:
@@ -42,11 +58,25 @@ class TTSService:
         self.appid = settings.API_APP_KEY
         self.access_token = settings.ACCESS_TOKEN
         self.voice_type = settings.TTS_VOICE
-
         self.endpoint = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
 
-    async def tts_page_async(self, file_id: str, page: int, text: str) -> str:
-        output_path = self.output_dir / f"{file_id}_page_{page}.mp3"
+    async def _connect(self):
+        import os
+        import ssl
+
+        proxy_vars = [
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+        ]
+        for var in proxy_vars:
+            if var in os.environ:
+                del os.environ[var]
+
+        os.environ["no_proxy"] = "openspeech.bytedance.com"
 
         headers = {
             "X-Api-App-Key": self.appid,
@@ -55,185 +85,218 @@ class TTSService:
             "X-Api-Connect-Id": str(uuid.uuid4()),
         }
 
-        logger.info(f"Connecting to {self.endpoint}")
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
 
         try:
-            websocket = await websockets.connect(
+            ws = await websockets.connect(
                 self.endpoint,
                 additional_headers=headers,
-                max_size=10 * 1024 * 1024,
+                open_timeout=30,
+                ping_interval=15,
+                ping_timeout=15,
+                ssl=ssl_context,
+                family=socket.AF_INET,
             )
-
-            logger.info(
-                f"Connected. Logid: {websocket.response.headers.get('x-tt-logid')}"
-            )
-
-            try:
-                # ✅ 1. 启动连接（协议版本）
-                await start_connection(websocket)
-                await wait_for_event(
-                    websocket,
-                    MsgType.FullServerResponse,
-                    EventType.ConnectionStarted,
-                )
-
-                sentences = text.split("。")
-                audio_data = bytearray()
-
-                for sentence in sentences:
-                    if not sentence.strip():
-                        continue
-
-                    # ✅ 基础请求参数
-                    base_request = {
-                        "user": {"uid": str(uuid.uuid4())},
-                        "namespace": "BidirectionalTTS",
-                        "req_params": {
-                            "speaker": self.voice_type,
-                            "audio_params": {
-                                "format": "mp3",
-                                "sample_rate": 24000,
-                                "enable_timestamp": True,
-                            },
-                            "additions": json.dumps({"disable_markdown_filter": False}),
-                        },
-                    }
-
-                    session_id = str(uuid.uuid4())
-
-                    # ✅ 2. 启动 session（协议）
-                    start_req = copy.deepcopy(base_request)
-                    start_req["event"] = EventType.StartSession
-
-                    await start_session(
-                        websocket,
-                        json.dumps(start_req).encode(),
-                        session_id,
-                    )
-
-                    await wait_for_event(
-                        websocket,
-                        MsgType.FullServerResponse,
-                        EventType.SessionStarted,
-                    )
-
-                    # ✅ 3. 发送文本（逐字流式）
-                    async def send_text():
-                        for ch in sentence:
-                            req = copy.deepcopy(base_request)
-                            req["event"] = EventType.TaskRequest
-                            req["req_params"]["text"] = ch
-
-                            await task_request(
-                                websocket,
-                                json.dumps(req).encode(),
-                                session_id,
-                            )
-                            await asyncio.sleep(0.005)
-
-                        await finish_session(websocket, session_id)
-
-                    send_task = asyncio.create_task(send_text())
-
-                    # ✅ 4. 接收音频（二进制协议）
-                    while True:
-                        msg = await receive_message(websocket)
-
-                        if msg.type == MsgType.FullServerResponse:
-                            if msg.event == EventType.SessionFinished:
-                                break
-
-                        elif msg.type == MsgType.AudioOnlyServer:
-                            audio_data.extend(msg.payload)
-
-                        else:
-                            raise RuntimeError(f"TTS failed: {msg}")
-
-                    await send_task
-
-                # ✅ 5. 保存音频
-                if not audio_data:
-                    raise RuntimeError("No audio received")
-
-                with open(output_path, "wb") as f:
-                    f.write(audio_data)
-
-                logger.info(f"Saved audio: {output_path}")
-                return str(output_path)
-
-            finally:
-                # ✅ 6. 关闭连接
-                await finish_connection(websocket)
-                await wait_for_event(
-                    websocket,
-                    MsgType.FullServerResponse,
-                    EventType.ConnectionFinished,
-                )
-                await websocket.close()
-
         except Exception as e:
-            logger.error(f"TTS error: {e}", exc_info=True)
-            return ""
+            logger.error(f"WebSocket连接失败: {e}")
+            raise
 
-    def tts_page(self, file_id: str, page: int, text: str) -> str:
-        return asyncio.run(self.tts_page_async(file_id, page, text))
+        await start_connection(ws)
+        await asyncio.wait_for(
+            wait_for_event(ws, MsgType.FullServerResponse, EventType.ConnectionStarted),
+            timeout=10.0,
+        )
+        return ws
 
-    def generate_and_get_audio(self, file_id: str, page: int, text: str) -> str:
-        if not text:
-            raise ValueError("Empty text for TTS")
+    async def _synthesize_sentence(self, ws, base_request, sentence, page_num, idx):
+        session_id = str(uuid.uuid4())
 
-        return self.tts_page(file_id, page, text)
+        start_req = copy.deepcopy(base_request)
+        start_req["event"] = EventType.StartSession
 
-    def get_audio_path(self, file_id: str, page: int) -> str:
-        path = self.output_dir / f"{file_id}_page_{page}.mp3"
-        return str(path) if path.exists() else ""
+        await start_session(ws, json.dumps(start_req).encode(), session_id)
+        await asyncio.wait_for(
+            wait_for_event(ws, MsgType.FullServerResponse, EventType.SessionStarted),
+            timeout=10.0,
+        )
 
-    def merge_audio_files(self, file_id: str, page_count: int) -> str:
-        """合并多个音频文件为一个
+        req = copy.deepcopy(base_request)
+        req["event"] = EventType.TaskRequest
+        req["req_params"]["text"] = sentence
+        await task_request(ws, json.dumps(req).encode(), session_id)
 
-        Args:
-            file_id: 文件ID
-            page_count: 页面数量
+        pcm = bytearray()
+        await finish_session(ws, session_id)
 
-        Returns:
-            str: 合并后的音频文件路径
-        """
-        output_path = self.output_dir / f"{file_id}_merged.mp3"
+        while True:
+            msg = await asyncio.wait_for(receive_message(ws), timeout=15.0)
+            if msg.type == MsgType.AudioOnlyServer:
+                pcm.extend(msg.payload)
+            elif msg.type == MsgType.FullServerResponse:
+                if msg.event == EventType.SessionFinished:
+                    break
 
-        # 收集所有音频文件路径
-        audio_files = []
-        for page in range(1, page_count + 1):
-            audio_path = self.output_dir / f"{file_id}_page_{page}.mp3"
-            if audio_path.exists():
-                audio_files.append(str(audio_path))
+        if pcm:
+            b64 = base64.b64encode(bytes(pcm)).decode("utf-8")
+            logger.info(
+                f"[TTS] 第{idx}句完成: {len(pcm)}字节PCM, text='{sentence[:40]}...'"
+            )
+            return {
+                "type": "audio",
+                "data": b64,
+                "page": page_num,
+                "sentence": sentence,
+                "ts": time.time(),
+            }
+        else:
+            logger.warning(f"[TTS] 第{idx}句PCM为空: '{sentence[:40]}...'")
+            return None
 
-        if not audio_files:
-            logger.error("No audio files found to merge")
-            return ""
+    async def stream_tts_input(self, text_stream, page_num=1):
+        import websockets.exceptions
+
+        logger.info(
+            f"[TTS服务] 准备处理页面 {page_num}，等待大模型首字..."
+        )
+
+        first_text = ""
+        is_end = False
 
         try:
-            # 尝试使用pydub库合并音频文件
-            from pydub import AudioSegment
-
-            # 加载第一个音频文件
-            combined = AudioSegment.from_mp3(audio_files[0])
-
-            # 逐个添加其他音频文件
-            for audio_file in audio_files[1:]:
-                sound = AudioSegment.from_mp3(audio_file)
-                combined += sound
-
-            # 导出合并后的音频
-            combined.export(str(output_path), format="mp3")
-
-            logger.info(f"Merged audio saved to: {output_path}")
-            return str(output_path)
+            async for chunk in text_stream:
+                if chunk.get("type") == "text":
+                    first_text += chunk.get("data", "")
+                    if first_text.strip():
+                        break
+                elif chunk.get("type") == "end":
+                    is_end = True
+                    break
         except Exception as e:
-            logger.error(f"Failed to merge audio files: {str(e)}", exc_info=True)
-            return ""
+            logger.error(f"[TTS服务] 等待首字异常: {e}")
+            return
 
-    def get_audio_url(self, file_id: str, page: int) -> str:
-        return f"/audio/{file_id}/page/{page}"
+        if not first_text.strip() and is_end:
+            logger.info(f"[TTS服务] 页面 {page_num} 文本为空，无需生成语音")
+            return
 
-    def get_merged_audio_url(self, file_id: str) -> str:
-        return f"/audio/{file_id}/merged"
+        logger.info("[TTS服务] 首字就绪，建立 WebSocket 连接...")
+
+        try:
+            ws = await self._connect()
+
+            base_request = {
+                "user": {"uid": str(uuid.uuid4())},
+                "namespace": "BidirectionalTTS",
+                "req_params": {
+                    "speaker": self.voice_type,
+                    "audio_params": {
+                        "format": "pcm",
+                        "sample_rate": 24000,
+                        "enable_timestamp": True,
+                    },
+                },
+            }
+
+            sentence_queue = asyncio.Queue()
+
+            async def text_splitter():
+                try:
+                    buffer = first_text
+                    delimiters = set("。！？，；\n.!?,;")
+                    sentence_count = 0
+
+                    async def extract(buffer_in, force_flush=False):
+                        nonlocal sentence_count
+                        while len(buffer_in) > 0:
+                            last_delim_idx = -1
+                            for i in range(len(buffer_in) - 1, -1, -1):
+                                if buffer_in[i] in delimiters:
+                                    last_delim_idx = i
+                                    break
+
+                            if last_delim_idx != -1:
+                                sent = buffer_in[:last_delim_idx + 1].strip()
+                                buffer_in = buffer_in[last_delim_idx + 1:]
+                            elif force_flush or len(buffer_in) >= 60:
+                                sent = (
+                                    buffer_in[:60].strip()
+                                    if len(buffer_in) >= 60 and not force_flush
+                                    else buffer_in.strip()
+                                )
+                                buffer_in = buffer_in[len(sent):]
+                            else:
+                                break
+
+                            if sent:
+                                sentence_count += 1
+                                await sentence_queue.put(sent)
+
+                        return buffer_in
+
+                    buffer = await extract(buffer)
+
+                    if not is_end:
+                        async for text_chunk in text_stream:
+                            if text_chunk.get("type") == "text":
+                                buffer += text_chunk.get("data", "")
+                                buffer = await extract(buffer)
+                            elif text_chunk.get("type") == "end":
+                                break
+
+                    await extract(buffer, force_flush=True)
+
+                    logger.info(
+                        f"[TTS分句] 第{page_num}页共 {sentence_count} 个句子"
+                    )
+                except Exception as e:
+                    logger.error(f"[TTS分句] 异常: {e}", exc_info=True)
+                finally:
+                    await sentence_queue.put(None)
+
+            splitter_task = asyncio.create_task(text_splitter())
+
+            idx = 0
+            while True:
+                try:
+                    sentence = await asyncio.wait_for(
+                        sentence_queue.get(), timeout=120.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("[TTS] 等待句子超时，强制终止")
+                    break
+
+                if sentence is None:
+                    break
+
+                idx += 1
+                try:
+                    result = await self._synthesize_sentence(
+                        ws, base_request, sentence, page_num, idx
+                    )
+                    if result:
+                        yield result
+                except Exception as e:
+                    logger.error(
+                        f"[TTS] 第{idx}句合成失败: {e}", exc_info=True
+                    )
+
+            logger.info(f"[TTS] 页面{page_num}完成，共同成 {idx} 句语音")
+
+            try:
+                await asyncio.wait_for(splitter_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            try:
+                await finish_connection(ws)
+            except Exception:
+                pass
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+        except Exception as e:
+            logger.error(f"流式TTS生成发生异常: {str(e)}", exc_info=True)
+            yield {"type": "error", "message": f"TTS报错: {str(e)}"}
