@@ -1,49 +1,15 @@
-import logging
-from app.config import settings
-
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-# 确保数据库初始化
 from app.models.db import init_db
 
 init_db()
 from app.models.db import get_upload
 from app.models.schemas import PageInfo
 from app.services.pdf_service import PDFService
+from app.utils.logging import get_logger
 
-# 配置日志
-if settings.ENABLE_LOGGING:
-    # 创建文件处理器，将日志写入log.txt文件
-    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    file_handler.setFormatter(file_formatter)
-
-    # 创建控制台处理器
-    console_handler = logging.StreamHandler()
-    console_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    console_handler.setFormatter(console_formatter)
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-else:
-    # 只显示错误日志
-    # 创建文件处理器，将错误日志写入log.txt文件
-    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    file_handler.setFormatter(file_formatter)
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.ERROR)
-    logger.addHandler(file_handler)
+logger = get_logger(__name__)
 
 router = APIRouter()
 service = PDFService()
@@ -55,7 +21,11 @@ def get_pdf_info(file_id: str):
     if not upload:
         raise HTTPException(status_code=404, detail="File not found")
 
-    pages = service.list_pages(upload.get("path"))
+    try:
+        pages = service.list_pages(upload.get("path"))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="PDF file not found on disk")
+
     return {
         "file_id": upload["file_id"],
         "filename": upload["filename"],
@@ -78,5 +48,9 @@ def get_pdf_page(file_id: str, page: int):
         image_base64 = service.get_page_image(file_path, page)
         image_url = f"data:image/png;base64,{image_base64}"
         return PageInfo(page=page, text=text, image_url=image_url)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="PDF file not found on disk")
+    except IndexError:
+        raise HTTPException(status_code=400, detail="Page number out of range")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))

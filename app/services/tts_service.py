@@ -1,11 +1,9 @@
 import asyncio
 import json
-import logging
 import uuid
 import re
 import copy
 from pathlib import Path
-from typing import List
 import base64
 import socket
 import time
@@ -13,7 +11,8 @@ import time
 import websockets
 
 from app.config import settings
-from protocols import (
+from app.utils.logging import get_logger
+from app.services.protocols import (
     EventType,
     MsgType,
     MsgTypeFlagBits,
@@ -26,28 +25,7 @@ from protocols import (
     wait_for_event,
 )
 
-# 配置日志
-if settings.ENABLE_LOGGING:
-    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    file_handler.setFormatter(file_formatter)
-
-    console_handler = logging.StreamHandler()
-    console_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    console_handler.setFormatter(console_formatter)
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-else:
-    logging.basicConfig(level=logging.CRITICAL)
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.CRITICAL)
+logger = get_logger(__name__)
 
 
 class TTSService:
@@ -128,6 +106,7 @@ class TTSService:
         await task_request(ws, json.dumps(req).encode(), session_id)
 
         pcm = bytearray()
+        word_boundary = []
         await finish_session(ws, session_id)
 
         while True:
@@ -137,17 +116,32 @@ class TTSService:
             elif msg.type == MsgType.FullServerResponse:
                 if msg.event == EventType.SessionFinished:
                     break
+                elif msg.event == EventType.TTSResponse:
+                    payload = json.loads(msg.payload.decode("utf-8"))
+                    wb = payload.get("word_boundary", [])
+                    word_boundary = [
+                        {
+                            "char": w["word"],
+                            "start": round(w["start_time"], 3),
+                            "end": round(w["end_time"], 3),
+                        }
+                        for w in wb
+                    ]
 
         if pcm:
             b64 = base64.b64encode(bytes(pcm)).decode("utf-8")
+            duration = round(len(pcm) / 2 / 24000, 3)
             logger.info(
-                f"[TTS] 第{idx}句完成: {len(pcm)}字节PCM, text='{sentence[:40]}...'"
+                f"[TTS] 第{idx}句完成: {len(pcm)}字节PCM, {duration}s,"
+                f" text='{sentence[:40]}...'"
             )
             return {
                 "type": "audio",
                 "data": b64,
                 "page": page_num,
                 "sentence": sentence,
+                "duration": duration,
+                "word_timestamps": word_boundary,
                 "ts": time.time(),
             }
         else:
@@ -158,8 +152,11 @@ class TTSService:
         import websockets.exceptions
 
         logger.info(
-            f"[TTS服务] 准备处理页面 {page_num}，等待大模型首字..."
+            f"[TTS服务] 准备处理页面 {page_num}，预连接 WebSocket 同时等待首字..."
         )
+
+        # 预建 WebSocket 连接，与 LLM 首字等待并发
+        connect_task = asyncio.create_task(self._connect())
 
         first_text = ""
         is_end = False
@@ -175,16 +172,18 @@ class TTSService:
                     break
         except Exception as e:
             logger.error(f"[TTS服务] 等待首字异常: {e}")
+            connect_task.cancel()
             return
 
         if not first_text.strip() and is_end:
             logger.info(f"[TTS服务] 页面 {page_num} 文本为空，无需生成语音")
+            connect_task.cancel()
             return
 
-        logger.info("[TTS服务] 首字就绪，建立 WebSocket 连接...")
+        logger.info("[TTS服务] 首字就绪，等待 WebSocket 连接就绪...")
 
         try:
-            ws = await self._connect()
+            ws = await connect_task
 
             base_request = {
                 "user": {"uid": str(uuid.uuid4())},
@@ -204,7 +203,7 @@ class TTSService:
             async def text_splitter():
                 try:
                     buffer = first_text
-                    delimiters = set("。！？，；\n.!?,;")
+                    delimiters = set("。！？，；\n!?,;")
                     sentence_count = 0
 
                     async def extract(buffer_in, force_flush=False):
@@ -217,15 +216,15 @@ class TTSService:
                                     break
 
                             if last_delim_idx != -1:
-                                sent = buffer_in[:last_delim_idx + 1].strip()
-                                buffer_in = buffer_in[last_delim_idx + 1:]
+                                sent = buffer_in[: last_delim_idx + 1].strip()
+                                buffer_in = buffer_in[last_delim_idx + 1 :]
                             elif force_flush or len(buffer_in) >= 60:
                                 sent = (
                                     buffer_in[:60].strip()
                                     if len(buffer_in) >= 60 and not force_flush
                                     else buffer_in.strip()
                                 )
-                                buffer_in = buffer_in[len(sent):]
+                                buffer_in = buffer_in[len(sent) :]
                             else:
                                 break
 
@@ -247,9 +246,7 @@ class TTSService:
 
                     await extract(buffer, force_flush=True)
 
-                    logger.info(
-                        f"[TTS分句] 第{page_num}页共 {sentence_count} 个句子"
-                    )
+                    logger.info(f"[TTS分句] 第{page_num}页共 {sentence_count} 个句子")
                 except Exception as e:
                     logger.error(f"[TTS分句] 异常: {e}", exc_info=True)
                 finally:
@@ -278,9 +275,7 @@ class TTSService:
                     if result:
                         yield result
                 except Exception as e:
-                    logger.error(
-                        f"[TTS] 第{idx}句合成失败: {e}", exc_info=True
-                    )
+                    logger.error(f"[TTS] 第{idx}句合成失败: {e}", exc_info=True)
 
             logger.info(f"[TTS] 页面{page_num}完成，共同成 {idx} 句语音")
 

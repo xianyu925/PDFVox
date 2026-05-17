@@ -1,26 +1,21 @@
-# PDF 解析依赖
-PyPDF2>=3.0.0
-pdfplumber>=0.9.0
-
-# Web 应用依赖
-fastapi>=0.109.1
+# Web 框架
+fastapi>=0.109.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
-jinja2>=3.1.2
-aiofiles>=23.2.1
+jinja2>=3.1.0
+
+# LLM / TTS / ASR 服务
+openai>=1.0.0
+websockets>=12.0
+faster-whisper>=1.0.0
+torch>=2.0.0
+silero-vad>=5.0
+
+# PDF 解析
+pdfplumber>=0.9.0
 
 # 基础依赖
-requests>=2.31.0
-numpy>=1.26.0
-pydantic>=2.8.0
-
-# AI/LLM 服务依赖
-openai>=1.0.0
-
-# 语音合成依赖
-websockets>=12.0
-pydub>=0.25.1
-
-# 其他依赖
 python-dotenv>=1.0.0
-silero-vad
+pydantic>=2.0.0
+numpy>=1.26.0
+requests>=2.31.0

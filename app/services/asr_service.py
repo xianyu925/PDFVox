@@ -2,12 +2,11 @@ import asyncio
 import os
 import tempfile
 import wave
-import logging
 from typing import Optional
 
-from app.config import settings
+from app.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 try:
     from silero_vad import load_silero_vad, get_speech_timestamps

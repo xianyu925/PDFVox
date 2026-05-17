@@ -1,4 +1,3 @@
-import logging
 import json
 import time
 import asyncio
@@ -8,36 +7,9 @@ from fastapi.responses import StreamingResponse
 from app.models.schemas import ExplainRequest, StatusResponse
 from app.services.explain_service import ExplainService
 from app.services.tts_service import TTSService
-from app.config import settings
+from app.utils.logging import get_logger
 
-# 配置日志
-if settings.ENABLE_LOGGING:
-    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    file_handler.setFormatter(file_formatter)
-
-    console_handler = logging.StreamHandler()
-    console_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    console_handler.setFormatter(console_formatter)
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-else:
-    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    file_handler.setFormatter(file_formatter)
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.ERROR)
-    logger.addHandler(file_handler)
+logger = get_logger(__name__)
 
 
 router = APIRouter()
@@ -47,9 +19,12 @@ tts_service = TTSService()
 
 @router.get("/playback/seek/{file_id}/page/{page_num}")
 async def playback_seek(
-    file_id: str, page_num: int, current_page: int = None, ahead: int = 60
+    file_id: str,
+    page_num: int,
+    time_offset: float = 0.0,
+    ahead: int = 60,
 ):
-    """用户拖动进度时：播放该页的完整讲解语音，同时后台并发预生成后续 `ahead` 页的讲稿（不阻塞）。"""
+    """用户拖动进度时：播放该页的讲解语音，支持 time_offset 秒的页内跳转。"""
 
     async def generate_stream():
         try:
@@ -62,16 +37,10 @@ async def playback_seek(
 
             total_pages = upload.get("total_pages", 1)
 
-            # 如果给定了 current_page，拒绝向前跳转（只能回退到更早的位置）
-            if current_page is not None and page_num > current_page:
-                yield f"data: {json.dumps({'type':'error','message':'只允许回退到更早的位置，禁止向前跳转'})}\n\n"
-                return
-
             # 尝试使用已缓存的完整讲稿
             cache_key = f"script_{file_id}_{page_num}"
             full_script = service.summary_cache.get(cache_key)
 
-            # 如果没有完整讲稿，同步生成完整讲稿后再播放
             if not full_script:
                 try:
                     full_script = await service.get_full_script(file_id, page_num)
@@ -80,7 +49,7 @@ async def playback_seek(
 
             play_text = full_script if full_script else "此页内容正在生成，请稍候。"
 
-            # 后台并发：预先为后续若干页生成完整讲稿
+            # 后台预生成后续页
             async def background_generate():
                 try:
                     for p in range(page_num + 1, min(total_pages + 1, page_num + 1 + ahead)):
@@ -90,13 +59,25 @@ async def playback_seek(
 
             asyncio.create_task(background_generate())
 
-            # 使用按句拆分的音频缓存（每句 = 完整语音 + 字幕，一一对应）
+            # 获取页内分句音频
             sentences, from_cache = await service.get_or_generate_page_sentences(
                 play_text, file_id, page_num
             )
 
-            for i, item in enumerate(sentences):
-                yield f"data: {json.dumps({'type': 'audio', 'data': item['audio'], 'sentence': item['sentence'], 'page': page_num, 'index': i})}\n\n"
+            # time_offset: 跳过前 N 句直到累计时长 >= offset
+            skipped = 0.0
+            start_idx = 0
+            if time_offset > 0:
+                for i, item in enumerate(sentences):
+                    d = item.get("duration", 0)
+                    if skipped + d >= time_offset:
+                        start_idx = i
+                        break
+                    skipped += d
+
+            for i in range(start_idx, len(sentences)):
+                item = sentences[i]
+                yield f"data: {json.dumps({'type': 'audio', 'data': item['audio'], 'sentence': item['sentence'], 'duration': item.get('duration', 0), 'page': page_num, 'index': i})}\n\n"
 
             yield "data: [DONE]\n\n"
 
@@ -214,16 +195,23 @@ async def explain_all_pages_stream_v3(
                     logger.info(f"[全书流] 检测到取消令牌，终止于第{page_num}页")
                     yield f"data: {json.dumps({'type': 'cancelled', 'ts': time.time()})}\n\n"
                     break
-                # 发送页面开始事件
+
                 yield f"data: {json.dumps({'type': 'page_start', 'page': page_num, 'ts': time.time()})}\n\n"
 
-                # 消费当前页的双流事件
+                # 当前页推流的同时，后台预热下一页所需的相邻摘要
+                prefetch_page = page_num + 2
+                if prefetch_page <= total_pages:
+                    asyncio.create_task(
+                        service.prefetch_summary(
+                            file_id, prefetch_page, pdf_path, course_name
+                        )
+                    )
+
                 async for event in service.explain_page_realtime_stream(
                     file_id, page_num, total_pages, course_name
                 ):
                     yield f"data: {json.dumps(event)}\n\n"
 
-                # 发送页面进度事件
                 yield f"data: {json.dumps({'type': 'page_complete', 'page': page_num, 'total_pages': total_pages, 'ts': time.time()})}\n\n"
 
             # 发送全局结束标记

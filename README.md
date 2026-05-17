@@ -1,155 +1,139 @@
-# PDF自动讲解项目 (PDFVox)
+# PDFVox — AI 驱动的 PDF 沉浸式语音讲解
 
 ## 项目简介
 
-PDFVox 是一个将 PDF 解析、智能理解、自然讲解与语音合成一体化的工具，支持PPT课程讲解。
-- 读取 PDF 并转为图像内容
-- 调用多模态大模型（火山引擎 doubao-seed-1-8）生成逐页讲解
-- 生成页间衔接段落并合并入 TTS 输入
-- 使用火山引擎 seed-tts-2.0 进行语音合成
-- 输出 mp3 语音文件
-- 提供Web界面，支持课程名称输入和交互式操作
+PDFVox 将 PDF/PPT 课程讲义自动转化为第一人称 AI 教授的口语化讲解，前端以流式方式同步播放语音与字幕，支持时间轴拖动、字级字幕高亮、录音问答等交互。
 
-## 当前功能
+**核心流程**：上传 PDF → 多模态 LLM 逐页生成讲稿 → TTS 逐句合成语音 → 浏览器实时播放
 
-1. **核心功能**：
-   - `PDFVox.analysis(pdf_path)`：解析 PDF，导出每页图像base64
-   - `PDFVox.understand(content, course_name)`：流式理解每页并生成讲解，自动生成过渡段落
-   - `PDFVox.save_explanations_to_txt(explanations, output_dir)`：写入 `output/explanations.txt`，每页讲解 + 对应衔接段
-   - `PDFVox.TTS(explanations, output_dir)`：将每页讲解+衔接合并后调用TTS生成音频
-   - `PDFVox.process(pdf_path, output_dir, course_name)`：完成全流程处理
+## 功能
 
-2. **Web界面功能**：
-   - PDF上传与预览
-   - 左右布局界面
-   - 课程名称输入（必填）
-   - 一键生成所有页面讲解
-   - 完整课程音频合并播放
-   - 分页音频播放
-   - 滚动检测当前页面
+- **流式讲解**：SSE 推送，LLM + TTS 并发，首字延迟 < 1s
+- **DVR 时间轴**：仿直播播放器的进度条，句级精确拖动回退
+- **字级字幕高亮**：逐字 `<span>` 渲染，当前朗读的字实时高亮
+- **语音问答**：录音 → ASR 转写 → LLM 流式回答 → TTS 语音播放
+- **多轮对话**：同一 PDF 内支持 5 轮追问
+- **沉浸模式**：全屏 PPT + 字幕叠加，左右方向键 ±5s 跳转
 
 ## 项目结构
 
 ```
 PDFVox/
-├── main.py              # 主入口文件
-├── config.py            # 配置文件
-├── app/                # Web应用模块
-│   ├── main.py          # FastAPI应用入口
-│   ├── config.py        # Web应用配置
-│   ├── models/          # 数据模型
-│   │   ├── __init__.py
-│   │   ├── db.py        # 数据库操作
-│   │   └── schemas.py   # 数据模式定义
-│   ├── routers/         # API路由
-│   │   ├── __init__.py
-│   │   ├── ai_explain.py # AI讲解相关路由
-│   │   ├── audio.py     # 音频相关路由
-│   │   ├── pdf_view.py  # PDF浏览相关路由
-│   │   └── upload.py    # 上传相关路由
-│   ├── services/        # 服务层
-│   │   ├── __init__.py
-│   │   ├── explain_service.py # 讲解服务
-│   │   ├── llm_service.py     # LLM服务
-│   │   ├── pdf_service.py     # PDF服务
-│   │   ├── protocols.py       # 通信协议
-│   │   └── tts_service.py     # TTS服务
-│   └── tts_server.py    # TTS服务器
-├── web/                # 前端网页文件
-│   ├── index.html       # 上传页面
-│   ├── viewer.html      # 讲解查看页面
-│   └── static/          # 静态资源
-├── requirements.txt     # 依赖文件
-├── .env                # 环境变量文件
-├── output/             # 运行输出目录
-└── README.md           # 项目说明
+├── run.py                        # 启动入口
+├── app/
+│   ├── config.py                 # 全局配置（从 .env 读取）
+│   ├── main.py                   # FastAPI 应用
+│   ├── models/
+│   │   ├── db.py                 # SQLite 上传/任务记录
+│   │   └── schemas.py            # Pydantic 数据模型
+│   ├── routers/
+│   │   ├── upload.py             # POST /upload/       PDF 上传
+│   │   ├── pdf_view.py           # GET  /pdf/{id}      页面图像
+│   │   ├── ai_explain.py         # GET  /explain/...   流式讲解 / seek / cancel
+│   │   └── qa.py                 # POST /qa/ask/stream 流式问答
+│   ├── services/
+│   │   ├── explain_service.py    # 讲解编排：摘要缓存、LLM+TTS 双流
+│   │   ├── qa_service.py         # 问答服务：多轮历史、prompt 构建
+│   │   ├── llm_service.py        # 火山引擎 doubao 多模态 API
+│   │   ├── tts_service.py        # 火山引擎双向 WebSocket TTS
+│   │   ├── asr_service.py        # faster-whisper + Silero VAD 语音识别
+│   │   ├── pdf_service.py        # pdfplumber 页面渲染 (150 DPI)
+│   │   └── protocols.py          # 火山 TTS WebSocket 二进制协议
+│   └── utils/
+│       └── logging.py            # 统一日志配置（LOG_LEVEL 环境变量）
+├── web/
+│   ├── index.html                # 上传页面
+│   ├── viewer.html               # 讲解播放页面
+│   ├── status.html               # 任务状态页
+│   └── static/
+│       ├── viewer.js             # 入口：PDF 加载、全屏、模块组装
+│       ├── viewer-state.js       # 共享状态 / DOM 引用
+│       ├── viewer-audio.js       # Web Audio 播放、DVR 进度、seek、字级高亮
+│       └── viewer-stream.js      # SSE 流处理、按钮状态机、录音问答
+├── .env.example                  # 环境变量模板
+└── requirements.txt
 ```
 
-## 运行环境
+## 快速开始
 
-- Python 3.8+
-- Windows/macOS/Linux 均可
-
-## 依赖安装
+### 1. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 配置
-
-1. **环境变量配置**：
-   创建 `.env` 文件并设置以下内容：
-   ```
-   API_KEY=your_volcengine_doubao_api_key_here
-   API_APP_KEY=your_volcengine_app_key_here
-   ACCESS_TOKEN=your_volcengine_access_token_here
-   TTS_VOICE=zh_female_yingyujiaoxue_uranus_bigtts
-   ENABLE_LOGGING=true
-   ```
-
-2. **默认配置**：
-   编辑 `config.py`：
-   - `DEFAULT_PDF_PATH`：默认输入 PDF 文件路径
-   - `DEFAULT_OUTPUT_DIR`：输出目录（音频 + 文稿）
-
-## 使用方法
-
-### 1. 命令行模式
+### 2. 配置环境变量
 
 ```bash
-python main.py --mode legacy
+cp .env.example .env
 ```
 
-执行后：
-- 音频输出到 `output/page_{n}.mp3`
+编辑 `.env`：
 
-### 2. Web界面模式（推荐）
+```env
+API_KEY=your_volcengine_api_key
+ACCESS_TOKEN=your_volcengine_access_token
+API_APP_KEY=your_volcengine_app_key
+TTS_VOICE=zh_female_yingyujiaoxue_uranus_bigtts
+LOG_LEVEL=INFO
+LOG_TO_CONSOLE=true
+```
+
+### 3. 启动
 
 ```bash
-python main.py --mode web
+python run.py
 ```
 
-然后在浏览器中访问：`http://localhost:8000`
+浏览器访问 `http://localhost:8000`。
 
-**Web界面使用流程**：
-1. 上传PDF文件
-2. 进入讲解页面
-3. 输入课程名称（如"机器学习导论"）
-4. 点击"生成讲解"按钮
-5. 查看讲解内容并播放音频
+## 日志控制
 
-## 细节说明
+通过 `LOG_LEVEL` 环境变量控制日志等级，支持 `DEBUG | INFO | WARNING | ERROR | CRITICAL`，默认 `INFO`。
 
-- 支持批量处理所有PDF页面
-- 使用摘要缓存机制，避免重复生成消耗token
-- 生成讲解时考虑前后页面摘要，使讲解更流畅
-- 提供生成时间统计，显示各阶段耗时
-- 支持音频合并功能，生成完整课程音频
-- 左右布局界面设计，用户体验更佳
-- 实现WebSocket协议与TTS服务通信
-- 集成SQLite3数据库存储上传和任务信息
+```bash
+# 开发调试
+LOG_LEVEL=DEBUG python run.py
 
-## 注意事项
+# 仅错误
+LOG_LEVEL=ERROR python run.py
+```
 
-- 确保火山引擎API密钥、APP KEY和访问令牌有效且可用
-- 需要安装FFmpeg以支持音频合并功能
-- 若接口返回非200，请检查网络和调用频率限制
-- 如出现乱码，请确认系统编码 UTF-8
-- 对于较大的PDF文件，处理时间可能较长
-- 生成讲解时需要输入课程名称
+## 前端模块说明
+
+| 模块 | 行数 | 职责 |
+|------|------|------|
+| `viewer.js` | ~180 | 入口：DOM 引用初始化、PDF 加载、全屏 |
+| `viewer-state.js` | ~40 | 所有共享状态 + DOM 引用 |
+| `viewer-audio.js` | ~350 | 音频播放、队列、DVR 时间轴、seek、字级字幕 |
+| `viewer-stream.js` | ~400 | SSE 流（全页讲解、恢复讲解、录音提问）、按钮状态机 |
+
+使用 ES 模块（`type="module"`），无需构建工具。
+
+## SSE 音频事件格式
+
+```json
+{
+  "type": "audio",
+  "data": "<base64 PCM, 24kHz 16-bit mono>",
+  "page": 3,
+  "sentence": "监督学习需要标注数据，而无监督学习不需要。",
+  "duration": 3.456,
+  "word_timestamps": [
+    { "char": "监", "start": 0.12, "end": 0.30 },
+    { "char": "督", "start": 0.30, "end": 0.46 }
+  ]
+}
+```
 
 ## 技术栈
 
-- **后端**：Python, FastAPI
-- **前端**：HTML, CSS, JavaScript
-- **PDF处理**：PyPDF2, pdfplumber
-- **AI模型**：火山引擎 doubao-seed-1-8 (多模态)
-- **语音合成**：火山引擎 seed-tts-2.0
-- **音频处理**：pydub
-- **WebSocket通信**：websockets
-- **数据库**：SQLite3
-
-## 可能需要的依赖版本
-
-请参考 `requirements.txt`。
+| 层 | 技术 |
+|----|------|
+| 后端框架 | FastAPI + uvicorn |
+| LLM | 火山引擎 doubao-seed (多模态) |
+| TTS | 火山引擎双向 WebSocket TTS (24kHz PCM) |
+| ASR | faster-whisper + Silero VAD |
+| PDF | pdfplumber (150 DPI 渲染) |
+| 前端 | 原生 ES 模块，Web Audio API，SSE |
+| 存储 | SQLite (上传记录) |

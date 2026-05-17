@@ -1,32 +1,9 @@
-import logging
-from app.config import settings
 from openai import OpenAI, AsyncOpenAI
 
-# 配置日志
-if settings.ENABLE_LOGGING:
-    # 创建文件处理器，将日志写入log.txt文件
-    file_handler = logging.FileHandler("log.txt", encoding="utf-8")
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    file_handler.setFormatter(file_formatter)
+from app.config import settings
+from app.utils.logging import get_logger
 
-    # 创建控制台处理器
-    console_handler = logging.StreamHandler()
-    console_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    console_handler.setFormatter(console_formatter)
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-else:
-    # 禁用日志
-    logging.basicConfig(level=logging.CRITICAL)
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.CRITICAL)
+logger = get_logger(__name__)
 
 
 class LLMService:

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 try:
     from dotenv import load_dotenv
@@ -13,7 +14,10 @@ class Settings:
     ACCESS_TOKEN: str = os.getenv("ACCESS_TOKEN", "")
     API_APP_KEY: str = os.getenv("API_APP_KEY", "")
     TTS_VOICE: str = os.getenv("TTS_VOICE", "")
-    STORAGE_PATH: str = "output"
+    STORAGE_PATH: str = os.getenv(
+        "STORAGE_PATH",
+        str(Path(__file__).resolve().parent.parent / "output")
+    )
     ALLOWED_EXTENSIONS: tuple = (".pdf",)
     MODEL_ENDPOINT: str = os.getenv("MODEL_ENDPOINT", "")
     HOST: str = os.getenv("HOST", "0.0.0.0")
@@ -23,7 +27,12 @@ class Settings:
         "true",
         "yes",
     )
-    ENABLE_LOGGING: bool = True
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_TO_CONSOLE: bool = os.getenv("LOG_TO_CONSOLE", "True").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 settings = Settings()
