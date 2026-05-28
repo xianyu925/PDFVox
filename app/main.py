@@ -28,17 +28,15 @@ templates = Jinja2Templates(directory="web")
 
 @app.get("/")
 def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
-
+    return templates.TemplateResponse(request, "index.html", {"request": request})
 
 @app.get("/viewer.html")
 def viewer(request: Request):
-    return templates.TemplateResponse("viewer.html", {"request": request})
-
+    return templates.TemplateResponse(request, "viewer.html", {"request": request})
 
 @app.get("/status.html")
 def status(request: Request):
-    return templates.TemplateResponse("status.html", {"request": request})
+    return templates.TemplateResponse(request, "status.html", {"request": request})
 
 
 @app.get("/api/health")
