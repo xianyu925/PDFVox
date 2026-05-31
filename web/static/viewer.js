@@ -14,12 +14,58 @@ dom.explainStatus = document.getElementById('explain-status');
 dom.askBtn = document.getElementById('ask-btn');
 dom.globalSubtitle = document.getElementById('global-subtitle');
 dom.progressSlider = document.getElementById('progress-slider');
-dom.volumeSlider = document.getElementById('volume-slider');
 dom.playPauseBtn = document.getElementById('play-pause-btn');
 dom.playIcon = document.getElementById('play-icon');
 dom.pauseIcon = document.getElementById('pause-icon');
 dom.timeCurrent = document.getElementById('time-current');
 dom.timeTotal = document.getElementById('time-total');
+dom.loadingSpinner = document.getElementById('loading-spinner');
+
+// ---- 左侧面板宽度调节 ----
+
+(function setupResizePanel() {
+    const leftPanel = document.getElementById('left-panel');
+    const handle = document.getElementById('resize-handle');
+    if (!leftPanel || !handle) return;
+
+    const MIN_WIDTH = 220;
+    const MAX_WIDTH_RATIO = 0.5;
+    const LS_KEY = 'pdfvox_left_panel_width';
+
+    // 恢复上次保存的宽度
+    const saved = localStorage.getItem(LS_KEY);
+    if (saved) {
+        const w = parseInt(saved, 10);
+        if (w >= MIN_WIDTH) leftPanel.style.width = w + 'px';
+    }
+
+    let isResizing = false;
+
+    handle.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        handle.classList.add('active');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isResizing) return;
+        const maxW = window.innerWidth * MAX_WIDTH_RATIO;
+        let newW = e.clientX - leftPanel.getBoundingClientRect().left;
+        newW = Math.max(MIN_WIDTH, Math.min(maxW, newW));
+        leftPanel.style.width = newW + 'px';
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!isResizing) return;
+        isResizing = false;
+        handle.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        localStorage.setItem(LS_KEY, leftPanel.style.width);
+    });
+})();
 
 // ---- 页面计数器 ----
 

@@ -23,6 +23,16 @@ function _syncPlayPauseIcon() {
     }
 }
 
+// ---- Loading indicator ----
+
+function _showLoadingIndicator() {
+    if (dom.loadingSpinner) dom.loadingSpinner.style.display = '';
+}
+
+function _hideLoadingIndicator() {
+    if (dom.loadingSpinner) dom.loadingSpinner.style.display = 'none';
+}
+
 export function updateProgressUI() {
     if (state.isQaActive) return;
     const slider = dom.progressSlider;
@@ -96,6 +106,8 @@ export function initAudioContext() {
     state.nextPlayTime = state.audioCtx.currentTime + 0.1;
     state.playbackStartTime = state.nextPlayTime;
     state.audioQueue = [];
+    state.isLoading = false;
+    _hideLoadingIndicator();
     dom.globalSubtitle.innerHTML = "";
     dom.globalSubtitle.classList.remove('active');
     state.isProcessingQueue = false;
@@ -139,6 +151,18 @@ export async function queueAudioChunk(base64Data, page, sentence, duration, word
 async function processAudioQueue() {
     if (state.isProcessingQueue || state.audioQueue.length === 0) return;
     state.isProcessingQueue = true;
+
+    // LOADING → PLAYING 自动恢复：新 chunk 已到达
+    if (state.isLoading) {
+        state.isLoading = false;
+        _hideLoadingIndicator();
+        if (state.audioCtx && state.audioCtx.state === 'suspended') {
+            state.playbackStartTime = state.audioCtx.currentTime;
+            await state.audioCtx.resume();
+            startProgressSync();
+            _syncPlayPauseIcon();
+        }
+    }
 
     while (state.audioQueue.length > 0) {
         const item = state.audioQueue.shift();
@@ -190,11 +214,7 @@ async function processAudioQueue() {
 
             const source = state.audioCtx.createBufferSource();
             source.buffer = audioBuffer;
-            if (state.audioCtx._masterGain) {
-                source.connect(state.audioCtx._masterGain);
-            } else {
-                source.connect(state.audioCtx.destination);
-            }
+            source.connect(state.audioCtx.destination);
 
             const now = state.audioCtx.currentTime;
             if (state.nextPlayTime < now) state.nextPlayTime = now;
@@ -214,6 +234,18 @@ async function processAudioQueue() {
             console.error('PCM 音频处理失败:', err);
             await new Promise(resolve => setTimeout(resolve, 100));
         }
+    }
+
+    // 队列已空 → 进入 LOADING 状态，冻结 currentTime，避免空转
+    if (!state.isQaActive && state.audioCtx && !state.isSeeking && state.audioCtx.state === 'running') {
+        state.playedTime += Math.max(0, state.audioCtx.currentTime - state.playbackStartTime);
+        state.playbackStartTime = state.audioCtx.currentTime;
+        await state.audioCtx.suspend();
+        state.isLoading = true;
+        _showLoadingIndicator();
+        stopProgressSync();
+        _syncPlayPauseIcon();
+        updateProgressUI();
     }
 
     dom.globalSubtitle.classList.remove('active');
@@ -346,6 +378,20 @@ export function setupPlayerControls() {
             startProgressSync();
         }
         if (state.audioCtx.state === 'suspended') {
+            // LOADING 态：用户点击 → 转为 PAUSED，不恢复播放
+            if (state.isLoading) {
+                state.isLoading = false;
+                _hideLoadingIndicator();
+                dom.playIcon.style.display = 'block';
+                dom.pauseIcon.style.display = 'none';
+                return;
+            }
+            // PAUSED 态但队列为空 → 进入 LOADING
+            if (state.audioQueue.length === 0 && !state.isSeeking) {
+                state.isLoading = true;
+                _showLoadingIndicator();
+                return;
+            }
             await state.audioCtx.resume();
             state.playbackStartTime = state.audioCtx.currentTime;
             dom.playIcon.style.display = 'none';
@@ -371,19 +417,6 @@ export function setupPlayerControls() {
         state.isDragging = false;
         const t = parseFloat(e.target.value);
         if (!isNaN(t) && t >= 0) seekToTime(t);
-    });
-
-    dom.volumeSlider.addEventListener('input', (e) => {
-        const v = parseFloat(e.target.value);
-        if (!state.audioCtx) return;
-        if (!state.audioCtx._masterGain) {
-            const gain = state.audioCtx.createGain();
-            gain.gain.value = v;
-            gain.connect(state.audioCtx.destination);
-            state.audioCtx._masterGain = gain;
-        } else {
-            state.audioCtx._masterGain.gain.value = v;
-        }
     });
 
     document.addEventListener('keydown', (e) => {

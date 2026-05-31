@@ -31,13 +31,13 @@
             display: flex;
             padding: 16px;
             overflow: hidden;
-            gap: 16px;
+            gap: 0;
         }
 
         .left-panel {
             width: 340px;
             background-color: var(--bg-surface);
-            border-radius: 20px;
+            border-radius: 20px 0 0 20px;
             padding: 24px;
             display: flex;
             flex-direction: column;
@@ -45,7 +45,6 @@
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
             overflow-y: auto;
             flex-shrink: 0;
-            transition: all 0.3s ease;
         }
 
         .left-panel::-webkit-scrollbar,
@@ -62,6 +61,22 @@
         .pdf-container::-webkit-scrollbar-thumb {
             background-color: #cbd5e1;
             border-radius: 10px;
+        }
+
+        /* 宽度调节拖拽手柄 */
+        .resize-handle {
+            width: 4px;
+            cursor: col-resize;
+            flex-shrink: 0;
+            position: relative;
+            background: transparent;
+            transition: background 0.2s;
+            margin: 4px 0;
+            border-radius: 2px;
+        }
+        .resize-handle:hover,
+        .resize-handle.active {
+            background: var(--primary-color);
         }
 
         .logo {
@@ -148,6 +163,7 @@
             overflow: hidden;
             box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.02);
             transition: all 0.3s ease;
+            margin-left: 16px;
         }
 
         /* 隐藏原生全屏默认背景 */
@@ -359,6 +375,10 @@
         #hidden-dummies {
             display: none;
         }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 
@@ -369,7 +389,7 @@
         <div class="logo">PDFVox</div>
         <div class="input-group">
             <label for="course-name">课程名称 <span class="required">*</span></label>
-            <input type="text" id="course-name" placeholder="为您的课程命名..." required value="机器学习导论" />
+            <input type="text" id="course-name" placeholder="为您的课程命名..." required />
         </div>
         <button id="explain-all-btn" disabled>一键生成沉浸式讲解</button>
         <div id="explain-status" style="font-size:12px; color:var(--text-muted); text-align:center; margin-top:4px; min-height:18px;"></div>
@@ -390,13 +410,15 @@
             <input id="progress-slider" type="range" min="0" value="0" step="0.05"
                 style="flex:1; vertical-align:middle;" />
             <span id="time-total" style="font-size:11px; color:var(--text-muted); min-width:36px; flex-shrink:0;">00:00</span>
-            <input id="volume-slider" type="range" min="0" max="1" step="0.01" value="1" title="音量"
-                style="width:36px; flex-shrink:0; vertical-align:middle;" />
+            <svg id="loading-spinner" class="rotate-spinner" style="display:none; width:14px; height:14px; flex-shrink:0; color:#4f46e5; animation:spin 0.8s linear infinite;" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-opacity="0.2"/>
+                <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            </svg>
         </div>
-        <div style="font-size: 13px; color: var(--text-muted); text-align: center; margin-top: -10px;">
-            基于 SSE 流式架构，音画同步
-        </div>
+
     </div>
+
+    <div class="resize-handle" id="resize-handle"></div>
 
     <!-- 右侧面板 (全屏区域) -->
     <div class="right-panel" id="right-panel">
