@@ -85,7 +85,64 @@ export function stopProgressSync() {
     }
 }
 
-// ---- Audio playback ----
+// ---- Page switching ----
+
+/**
+ * 统一翻页入口。普通模式高亮 + 平滑滚动；全屏模式仅显示当前页。
+ * @param {number} pageNum  1-based
+ * @param {object} [opts]
+ * @param {boolean} [opts.updatePlayingPage] 是否同步 currentPlayingPage（音频驱动翻页时传 true）
+ * @param {number}  [opts.scrollDelay]       滚动后多长 ms 内抑制 detectCurrentPage（默认 600）
+ */
+export function switchToPage(pageNum, { updatePlayingPage = false, scrollDelay = 600 } = {}) {
+    if (updatePlayingPage) {
+        state.currentPlayingPage = pageNum;
+        // 记录页时间映射
+        if (state.pageTimeMap.length > 0 && !state.pageTimeMap[state.pageTimeMap.length - 1].endTime) {
+            state.pageTimeMap[state.pageTimeMap.length - 1].endTime = state.playedTime;
+        }
+        if (state.pageTimeMap.length === 0 || state.pageTimeMap[state.pageTimeMap.length - 1].page !== pageNum) {
+            state.pageTimeMap.push({ page: pageNum, startTime: state.playedTime });
+        }
+    }
+    state.currentPage = pageNum;
+    updatePageCounter();
+
+    const pageEl = document.getElementById(`page-wrapper-${pageNum}`);
+    if (!pageEl) return;
+
+    if (document.fullscreenElement) {
+        // 全屏：只显示当前页
+        document.querySelectorAll('.pdf-page-wrapper').forEach(el => {
+            el.style.display = 'none';
+            el.classList.remove('active-page');
+        });
+        pageEl.style.display = 'block';
+        pageEl.classList.add('active-page');
+    } else {
+        // 普通：高亮当前页 + 平滑滚动
+        document.querySelectorAll('.pdf-page-wrapper').forEach(el => el.classList.remove('active-page'));
+        pageEl.classList.add('active-page');
+        state.isAutoScrolling = true;
+        pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // 平滑滚动结束后恢复标志位
+        if (state._scrollTimer) clearTimeout(state._scrollTimer);
+        state._scrollTimer = setTimeout(() => {
+            state.isAutoScrolling = false;
+            state._scrollTimer = null;
+        }, scrollDelay);
+    }
+}
+
+/** 供 viewer.js 中的 detectCurrentPage 使用 */
+function updatePageCounter() {
+    const counter = document.getElementById('page-counter');
+    if (counter) {
+        counter.textContent = `${state.currentPage} / ${state.totalPages}`;
+    }
+}
+
+export { updatePageCounter };
 
 export function initAudioContext() {
     if (!state.audioCtx) {
@@ -169,22 +226,7 @@ async function processAudioQueue() {
         if (state.isSeeking) break;
 
         if (!state.isQaActive && item.page !== state.currentPlayingPage) {
-            state.currentPlayingPage = item.page;
-            state.currentPage = item.page;
-
-            if (state.pageTimeMap.length > 0 && !state.pageTimeMap[state.pageTimeMap.length - 1].endTime) {
-                state.pageTimeMap[state.pageTimeMap.length - 1].endTime = state.playedTime;
-            }
-            if (state.pageTimeMap.length === 0 || state.pageTimeMap[state.pageTimeMap.length - 1].page !== item.page) {
-                state.pageTimeMap.push({ page: item.page, startTime: state.playedTime });
-            }
-
-            const pageEl = document.getElementById(`page-wrapper-${state.currentPlayingPage}`);
-            if (pageEl) {
-                document.querySelectorAll('.pdf-page-wrapper').forEach(el => el.classList.remove('active-page'));
-                pageEl.classList.add('active-page');
-                pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
+            switchToPage(item.page, { updatePlayingPage: true });
         }
 
         try {
@@ -306,15 +348,7 @@ export async function seekToTime(targetSeconds) {
     const fileId = getQueryParam('file_id');
     if (!fileId) { state.isSeeking = false; return; }
 
-    state.currentPage = targetPage;
-    state.currentPlayingPage = targetPage;
-
-    const pageEl = document.getElementById(`page-wrapper-${targetPage}`);
-    if (pageEl) {
-        document.querySelectorAll('.pdf-page-wrapper').forEach(el => el.classList.remove('active-page'));
-        pageEl.classList.add('active-page');
-        pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+    switchToPage(targetPage, { updatePlayingPage: true });
 
     state.seekAbortController = new AbortController();
 

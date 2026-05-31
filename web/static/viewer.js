@@ -1,5 +1,5 @@
 import { state, dom, getQueryParam } from './viewer-state.js';
-import { setupPlayerControls, updateProgressUI, stopProgressSync } from './viewer-audio.js';
+import { setupPlayerControls, updateProgressUI, stopProgressSync, switchToPage, updatePageCounter } from './viewer-audio.js';
 import { setupExplainAllButton, setupAskButton } from './viewer-stream.js';
 
 // ---- DOM 引用初始化 ----
@@ -67,18 +67,11 @@ dom.loadingSpinner = document.getElementById('loading-spinner');
     });
 })();
 
-// ---- 页面计数器 ----
-
-function updatePageCounter() {
-    const counter = document.getElementById('page-counter');
-    if (counter) {
-        counter.textContent = `${state.currentPage} / ${state.totalPages}`;
-    }
-}
-
-// ---- 滚动检测当前页 ----
+// ---- 滚动检测当前页（仅手动滚动，自动翻页时跳过） ----
 
 function detectCurrentPage() {
+    // 全屏模式或程序化滚动中，不检测
+    if (document.fullscreenElement || state.isAutoScrolling) return;
     const container = document.getElementById('pdf-container');
     const pageElements = document.querySelectorAll('.pdf-page-wrapper');
     if (pageElements.length === 0) return;
@@ -89,8 +82,14 @@ function detectCurrentPage() {
         const pageTop = page.offsetTop;
         const pageHeight = page.offsetHeight;
         if (pageTop <= containerTop + containerHeight / 2 && pageTop + pageHeight > containerTop + containerHeight / 2) {
-            state.currentPage = i + 1;
-            updatePageCounter();
+            if (state.currentPage !== i + 1) {
+                state.currentPage = i + 1;
+                // 手动滚动时也同步 active-page 高亮
+                document.querySelectorAll('.pdf-page-wrapper').forEach(el => el.classList.remove('active-page'));
+                page.classList.add('active-page');
+                const counter = document.getElementById('page-counter');
+                if (counter) counter.textContent = `${state.currentPage} / ${state.totalPages}`;
+            }
             break;
         }
     }
@@ -108,18 +107,18 @@ fullscreenBtn.addEventListener('click', () => {
 
 document.addEventListener('fullscreenchange', () => {
     if (document.fullscreenElement) {
-        fullscreenBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"></path></svg> 退出全屏';
+        fullscreenBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16v3a2 2 0 0 0 2 2h3"></path></svg> 退出全屏';
         document.getElementById('left-panel').style.display = 'none';
-        const curEl = document.getElementById(`page-wrapper-${state.currentPage}`);
-        if (curEl) {
-            document.querySelectorAll('.pdf-page-wrapper').forEach(el => el.style.display = 'none');
-            curEl.style.display = 'block';
-            curEl.classList.add('active-page');
-        }
+        // 切换到全屏单页视图
+        switchToPage(state.currentPage);
     } else {
         fullscreenBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path></svg> 沉浸模式';
         document.getElementById('left-panel').style.display = 'flex';
-        document.querySelectorAll('.pdf-page-wrapper').forEach(el => el.style.display = 'flex');
+        // 恢复所有页显示
+        document.querySelectorAll('.pdf-page-wrapper').forEach(el => { el.style.display = 'flex'; });
+        // 高亮当前页
+        const curEl = document.getElementById(`page-wrapper-${state.currentPage}`);
+        if (curEl) curEl.classList.add('active-page');
     }
 });
 

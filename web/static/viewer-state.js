@@ -28,6 +28,7 @@ export const state = {
     isSeeking: false,
     isDragging: false,
     isLoading: false,               // 队列空转时自动挂起，等待新 chunk
+    isAutoScrolling: false,         // 程序化翻页滚动中，抑制 detectCurrentPage
     currentWordTimestamps: [],     // 当前句子的字级时间戳
     currentSentenceStartTime: 0,   // 当前句子在全局时间轴的起始秒数
     courseName: '',                 // 课程名称，供 seek 后恢复 SSE 流使用
