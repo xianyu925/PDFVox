@@ -1,16 +1,7 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
-
-from app.models.db import init_db
-
-init_db()
 from app.models.db import get_upload
 from app.models.schemas import PageInfo
 from app.services.pdf_service import PDFService
-from app.utils.logging import get_logger
-
-logger = get_logger(__name__)
-
 router = APIRouter()
 service = PDFService()
 

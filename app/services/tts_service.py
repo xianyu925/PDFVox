@@ -1,12 +1,12 @@
 import asyncio
-import json
-import uuid
-import re
-import copy
-from pathlib import Path
 import base64
+import copy
+import json
 import socket
 import time
+import uuid
+import wave
+from pathlib import Path
 
 import websockets
 
@@ -15,7 +15,6 @@ from app.utils.logging import get_logger
 from app.services.protocols import (
     EventType,
     MsgType,
-    MsgTypeFlagBits,
     start_connection,
     start_session,
     finish_session,
@@ -30,42 +29,41 @@ logger = get_logger(__name__)
 
 class TTSService:
     def __init__(self):
-        self.output_dir = Path("output")
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        self.appid = settings.API_APP_KEY
-        self.access_token = settings.ACCESS_TOKEN
+        self.apikey = settings.TTS_API_KEY
         self.voice_type = settings.TTS_VOICE
+        self.api_resource_id = settings.TTS_API_RESOURCE_ID
         self.endpoint = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
 
+    @staticmethod
+    def _parse_word_timestamps(payload):
+        """Normalize both legacy and Speech 2.0 timestamp payloads."""
+        words = payload.get("words") or payload.get("word_boundary") or []
+        timestamps = []
+        for word in words:
+            char = word.get("word") or word.get("text") or ""
+            start = word.get("startTime", word.get("start_time"))
+            end = word.get("endTime", word.get("end_time"))
+            if not char or start is None or end is None:
+                continue
+            timestamps.append(
+                {
+                    "char": char,
+                    "start": round(float(start), 3),
+                    "end": round(float(end), 3),
+                }
+            )
+        return timestamps
+
     async def _connect(self):
-        import os
         import ssl
 
-        proxy_vars = [
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-        ]
-        for var in proxy_vars:
-            if var in os.environ:
-                del os.environ[var]
-
-        os.environ["no_proxy"] = "openspeech.bytedance.com"
-
         headers = {
-            "X-Api-App-Key": self.appid,
-            "X-Api-Access-Key": self.access_token,
-            "X-Api-Resource-Id": "seed-tts-2.0",
+            "X-Api-Key": self.apikey,
+            "X-Api-Resource-Id": self.api_resource_id,
             "X-Api-Connect-Id": str(uuid.uuid4()),
         }
 
         ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
 
         try:
             ws = await websockets.connect(
@@ -116,17 +114,15 @@ class TTSService:
             elif msg.type == MsgType.FullServerResponse:
                 if msg.event == EventType.SessionFinished:
                     break
-                elif msg.event == EventType.TTSResponse:
+                elif msg.event in (
+                    EventType.TTSResponse,
+                    EventType.TTSSubtitle,
+                    EventType.TTSSentenceEnd,
+                ):
                     payload = json.loads(msg.payload.decode("utf-8"))
-                    wb = payload.get("word_boundary", [])
-                    word_boundary = [
-                        {
-                            "char": w["word"],
-                            "start": round(w["start_time"], 3),
-                            "end": round(w["end_time"], 3),
-                        }
-                        for w in wb
-                    ]
+                    parsed_timestamps = self._parse_word_timestamps(payload)
+                    if parsed_timestamps:
+                        word_boundary = parsed_timestamps
 
         if pcm:
             b64 = base64.b64encode(bytes(pcm)).decode("utf-8")
@@ -139,6 +135,7 @@ class TTSService:
                 "type": "audio",
                 "data": b64,
                 "page": page_num,
+                "index": idx,
                 "sentence": sentence,
                 "duration": duration,
                 "word_timestamps": word_boundary,
@@ -149,8 +146,6 @@ class TTSService:
             return None
 
     async def stream_tts_input(self, text_stream, page_num=1):
-        import websockets.exceptions
-
         logger.info(
             f"[TTS服务] 准备处理页面 {page_num}，预连接 WebSocket 同时等待首字..."
         )
@@ -173,15 +168,24 @@ class TTSService:
         except Exception as e:
             logger.error(f"[TTS服务] 等待首字异常: {e}")
             connect_task.cancel()
+            await asyncio.gather(connect_task, return_exceptions=True)
+            yield {
+                "type": "error",
+                "message": f"TTS input failed: {e}",
+                "page": page_num,
+            }
             return
 
         if not first_text.strip() and is_end:
             logger.info(f"[TTS服务] 页面 {page_num} 文本为空，无需生成语音")
             connect_task.cancel()
+            await asyncio.gather(connect_task, return_exceptions=True)
             return
 
         logger.info("[TTS服务] 首字就绪，等待 WebSocket 连接就绪...")
 
+        ws = None
+        splitter_task = None
         try:
             ws = await connect_task
 
@@ -194,6 +198,7 @@ class TTSService:
                         "format": "pcm",
                         "sample_rate": 24000,
                         "enable_timestamp": True,
+                        "enable_subtitle": True,
                     },
                 },
             }
@@ -249,6 +254,7 @@ class TTSService:
                     logger.info(f"[TTS分句] 第{page_num}页共 {sentence_count} 个句子")
                 except Exception as e:
                     logger.error(f"[TTS分句] 异常: {e}", exc_info=True)
+                    await sentence_queue.put(e)
                 finally:
                     await sentence_queue.put(None)
 
@@ -267,6 +273,14 @@ class TTSService:
                 if sentence is None:
                     break
 
+                if isinstance(sentence, Exception):
+                    yield {
+                        "type": "error",
+                        "message": f"TTS text splitting failed: {sentence}",
+                        "page": page_num,
+                    }
+                    break
+
                 idx += 1
                 try:
                     result = await self._synthesize_sentence(
@@ -274,24 +288,76 @@ class TTSService:
                     )
                     if result:
                         yield result
+                    else:
+                        yield {
+                            "type": "error",
+                            "message": "TTS returned empty audio",
+                            "page": page_num,
+                        }
+                        break
                 except Exception as e:
                     logger.error(f"[TTS] 第{idx}句合成失败: {e}", exc_info=True)
+                    yield {
+                        "type": "error",
+                        "message": f"TTS synthesis failed: {e}",
+                        "page": page_num,
+                    }
+                    break
 
             logger.info(f"[TTS] 页面{page_num}完成，共同成 {idx} 句语音")
 
-            try:
-                await asyncio.wait_for(splitter_task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
-            try:
-                await finish_connection(ws)
-            except Exception:
-                pass
-            try:
-                await ws.close()
-            except Exception:
-                pass
-
         except Exception as e:
             logger.error(f"流式TTS生成发生异常: {str(e)}", exc_info=True)
-            yield {"type": "error", "message": f"TTS报错: {str(e)}"}
+            yield {
+                "type": "error",
+                "message": f"TTS error: {str(e)}",
+                "page": page_num,
+            }
+        finally:
+            if splitter_task is not None and not splitter_task.done():
+                splitter_task.cancel()
+                await asyncio.gather(splitter_task, return_exceptions=True)
+            if not connect_task.done():
+                connect_task.cancel()
+                await asyncio.gather(connect_task, return_exceptions=True)
+            if ws is not None:
+                try:
+                    await finish_connection(ws)
+                except Exception:
+                    pass
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+
+    async def synthesize_to_wav(self, text: str, output_path):
+        """Synthesize text into a mono 24 kHz, 16-bit PCM WAV file."""
+        if not text or not text.strip():
+            raise ValueError("text must not be empty")
+
+        async def text_stream():
+            yield {"type": "text", "data": text}
+            yield {"type": "end"}
+
+        pcm = bytearray()
+        async for event in self.stream_tts_input(text_stream()):
+            if event.get("type") == "error":
+                raise RuntimeError(event.get("message", "TTS synthesis failed"))
+            if event.get("type") == "audio":
+                pcm.extend(base64.b64decode(event["data"]))
+
+        if not pcm:
+            raise RuntimeError("TTS returned no audio")
+
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        def write_wav():
+            with wave.open(str(path), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(24000)
+                wav_file.writeframes(bytes(pcm))
+
+        await asyncio.to_thread(write_wav)
+        return path

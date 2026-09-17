@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable, List
 
-import websockets
+from websockets.asyncio.client import ClientConnection
 
 from app.utils.logging import get_logger
 
@@ -124,6 +124,8 @@ class EventType(IntEnum):
     PodcastRoundStart = 360
     PodcastRoundResponse = 361
     PodcastRoundEnd = 362
+    PodcastEnd = 363
+    TTSSubtitle = 364
 
     # 450 ~ 499 Downstream ASR events
     ASRInfo = 450
@@ -427,7 +429,7 @@ class Message:
             return f"MsgType: {self.type}, EventType:{self.event}, Payload: {self.payload.decode('utf-8', 'ignore')}"
 
 
-async def receive_message(websocket: websockets.WebSocketClientProtocol) -> Message:
+async def receive_message(websocket: ClientConnection) -> Message:
     """Receive message from websocket"""
     try:
         data = await websocket.recv()
@@ -445,38 +447,18 @@ async def receive_message(websocket: websockets.WebSocketClientProtocol) -> Mess
 
 
 async def wait_for_event(
-    websocket: websockets.WebSocketClientProtocol,
+    websocket: ClientConnection,
     msg_type: MsgType,
     event_type: EventType,
 ) -> Message:
     """Wait for specific event"""
-    while True:
-        msg = await receive_message(websocket)
-        if msg.type != msg_type or msg.event != event_type:
-            raise ValueError(f"Unexpected message: {msg}")
-        if msg.type == msg_type and msg.event == event_type:
-            return msg
+    msg = await receive_message(websocket)
+    if msg.type != msg_type or msg.event != event_type:
+        raise ValueError(f"Unexpected message: {msg}")
+    return msg
 
 
-async def full_client_request(
-    websocket: websockets.WebSocketClientProtocol, payload: bytes
-) -> None:
-    """Send full client message"""
-    msg = Message(type=MsgType.FullClientRequest, flag=MsgTypeFlagBits.NoSeq)
-    msg.payload = payload
-    await websocket.send(msg.marshal())
-
-
-async def audio_only_client(
-    websocket: websockets.WebSocketClientProtocol, payload: bytes, flag: MsgTypeFlagBits
-) -> None:
-    """Send audio-only client message"""
-    msg = Message(type=MsgType.AudioOnlyClient, flag=flag)
-    msg.payload = payload
-    await websocket.send(msg.marshal())
-
-
-async def start_connection(websocket: websockets.WebSocketClientProtocol) -> None:
+async def start_connection(websocket: ClientConnection) -> None:
     """Start connection"""
     msg = Message(type=MsgType.FullClientRequest, flag=MsgTypeFlagBits.WithEvent)
     msg.event = EventType.StartConnection
@@ -484,7 +466,7 @@ async def start_connection(websocket: websockets.WebSocketClientProtocol) -> Non
     await websocket.send(msg.marshal())
 
 
-async def finish_connection(websocket: websockets.WebSocketClientProtocol) -> None:
+async def finish_connection(websocket: ClientConnection) -> None:
     """Finish connection"""
     msg = Message(type=MsgType.FullClientRequest, flag=MsgTypeFlagBits.WithEvent)
     msg.event = EventType.FinishConnection
@@ -493,7 +475,7 @@ async def finish_connection(websocket: websockets.WebSocketClientProtocol) -> No
 
 
 async def start_session(
-    websocket: websockets.WebSocketClientProtocol, payload: bytes, session_id: str
+    websocket: ClientConnection, payload: bytes, session_id: str
 ) -> None:
     """Start session"""
     msg = Message(type=MsgType.FullClientRequest, flag=MsgTypeFlagBits.WithEvent)
@@ -504,7 +486,7 @@ async def start_session(
 
 
 async def finish_session(
-    websocket: websockets.WebSocketClientProtocol, session_id: str
+    websocket: ClientConnection, session_id: str
 ) -> None:
     """Finish session"""
     msg = Message(type=MsgType.FullClientRequest, flag=MsgTypeFlagBits.WithEvent)
@@ -514,19 +496,8 @@ async def finish_session(
     await websocket.send(msg.marshal())
 
 
-async def cancel_session(
-    websocket: websockets.WebSocketClientProtocol, session_id: str
-) -> None:
-    """Cancel session"""
-    msg = Message(type=MsgType.FullClientRequest, flag=MsgTypeFlagBits.WithEvent)
-    msg.event = EventType.CancelSession
-    msg.session_id = session_id
-    msg.payload = b"{}"
-    await websocket.send(msg.marshal())
-
-
 async def task_request(
-    websocket: websockets.WebSocketClientProtocol, payload: bytes, session_id: str
+    websocket: ClientConnection, payload: bytes, session_id: str
 ) -> None:
     """Send task request"""
     msg = Message(type=MsgType.FullClientRequest, flag=MsgTypeFlagBits.WithEvent)

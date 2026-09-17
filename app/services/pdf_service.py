@@ -58,10 +58,13 @@ class PDFService:
                 return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
     def list_pages(self, file_path: str) -> List[int]:
+        return list(range(1, self.get_page_count(file_path) + 1))
+
+    def get_page_count(self, file_path: str) -> int:
         p = _resolve_path(file_path)
         if not p.exists():
             raise FileNotFoundError(f"PDF not found: {p}")
         lock = self._get_lock(str(p))
         with lock:
             with pdfplumber.open(str(p)) as pdf:
-                return list(range(1, len(pdf.pages) + 1))
+                return len(pdf.pages)

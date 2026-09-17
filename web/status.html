@@ -228,6 +228,12 @@
         const taskIdInput = document.getElementById('task-id');
         const checkBtn = document.getElementById('check-btn');
         const statusDiv = document.getElementById('task-status');
+        const escapeHtml = (value) => {
+            const element = document.createElement('span');
+            element.textContent = String(value ?? '');
+            return element.innerHTML;
+        };
+        taskIdInput.value = localStorage.getItem('pdfvox:lastTaskId') || '';
 
         checkBtn.addEventListener('click', async () => {
             const task_id = taskIdInput.value.trim();
@@ -254,7 +260,7 @@
             `;
 
             try {
-                const resp = await fetch(`/explain/status/${task_id}`);
+                const resp = await fetch(`/explain/status/${encodeURIComponent(task_id)}`);
                 if (!resp.ok) throw new Error(await resp.text());
                 const data = await resp.json();
 
@@ -262,11 +268,11 @@
                 statusDiv.innerHTML = `
                     <div class="status-item">
                         <div class="status-label">当前状态 (Status)</div>
-                        <div class="status-badge processing">${data.status}</div>
+                        <div class="status-badge processing">${escapeHtml(data.status)}</div>
                     </div>
                     <div class="status-item">
                         <div class="status-label">详情信息 (Detail)</div>
-                        <div class="status-value">${data.detail || '暂无进一步的详情说明'}</div>
+                        <div class="status-value">${escapeHtml(data.detail || '暂无进一步的详情说明')}</div>
                     </div>
                 `;
             } catch (error) {
@@ -274,7 +280,7 @@
                 statusDiv.innerHTML = `
                     <div style="color: #ef4444;">
                         <div style="font-weight: bold; margin-bottom: 8px;">❌ 查询出错</div>
-                        <div style="font-size: 13px;">${error.message || error}</div>
+                        <div style="font-size: 13px;">${escapeHtml(error.message || error)}</div>
                     </div>
                 `;
             }

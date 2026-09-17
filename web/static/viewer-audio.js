@@ -1,13 +1,55 @@
-import { state, dom, getQueryParam } from './viewer-state.js';
-import { continueExplainStream } from './viewer-stream.js';
+import { state, dom } from './viewer-state.js';
+import { formatTime, pcmDuration } from './viewer-timeline.js';
+import {
+    expandWordTimestamps,
+    highlightActiveWord,
+    renderSentenceSubtitle,
+} from './viewer-subtitles.js';
+import { switchToPage } from './viewer-pages.js';
 
-// ---- Time formatting ----
+const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
-export function formatTime(seconds) {
-    if (!isFinite(seconds) || seconds < 0) return '00:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+// ---- Playback state ----
+export function getCurrentPlaybackTime() {
+    let elapsed = state.playedTime;
+    const isPlayingLecture = state.audioCtx &&
+        state.audioCtx.state === 'running' &&
+        state.currentAudioSource &&
+        !state.currentAudioIsQa;
+    if (isPlayingLecture) {
+        const wallTime = Math.max(
+            0,
+            state.audioCtx.currentTime - state.playbackStartTime,
+        );
+        elapsed += wallTime * state.playbackRate;
+    }
+    if (state.currentAudioEndTime !== null) {
+        elapsed = Math.min(elapsed, state.currentAudioEndTime);
+    }
+    return Math.max(0, Math.min(elapsed, state.liveWindowEnd || elapsed));
+}
+
+export function setPlaybackRate(rate) {
+    const nextRate = Number(rate);
+    if (!PLAYBACK_RATES.includes(nextRate)) return;
+
+    const currentTime = getCurrentPlaybackTime();
+    const now = state.audioCtx?.currentTime || 0;
+    if (state.currentAudioSource && !state.currentAudioIsQa) {
+        state.playedTime = currentTime;
+        state.playbackStartTime = now;
+    }
+
+    state.playbackRate = nextRate;
+    if (state.currentAudioSource) {
+        state.currentAudioSource.playbackRate.setValueAtTime(nextRate, now);
+        // The queue starts the next source only after this source ends.
+        // Resetting the scheduler anchor prevents a stale pre-rate-change
+        // end time from inserting a gap before the next sentence.
+        state.nextPlayTime = now;
+    }
+    if (dom.playbackRate) dom.playbackRate.value = String(nextRate);
+    updateProgressUI();
 }
 
 // ---- Progress UI ----
@@ -38,8 +80,7 @@ export function updateProgressUI() {
     const slider = dom.progressSlider;
     const label = dom.timeCurrent;
     if (!slider || !state.audioCtx || !state.liveWindowEnd) return;
-    const now = state.audioCtx.currentTime;
-    const elapsed = state.playedTime + Math.max(0, now - state.playbackStartTime);
+    const elapsed = getCurrentPlaybackTime();
     const pct = Math.min(100, (elapsed / state.liveWindowEnd) * 100);
     // 拖拽中不覆盖 slider 值，只更新时间标签
     if (!state.isDragging) {
@@ -49,27 +90,7 @@ export function updateProgressUI() {
             `linear-gradient(to right, #4f46e5 0%, #4f46e5 ${pct}%, #e2e8f0 ${pct}%, #e2e8f0 100%)`;
     }
     // 字级高亮
-    _highlightActiveWord(elapsed);
-}
-
-function _highlightActiveWord(elapsed) {
-    const wts = state.currentWordTimestamps;
-    if (!wts.length || !state.currentSentenceStartTime) return;
-    const offset = Math.max(0, elapsed - state.currentSentenceStartTime);
-    let activeIdx = -1;
-    for (let i = 0; i < wts.length; i++) {
-        if (offset >= wts[i].start && offset < wts[i].end) {
-            activeIdx = i; break;
-        }
-    }
-    // 已越界：全部取消高亮
-    if (activeIdx === -1 && offset >= (wts[wts.length - 1]?.end || Infinity)) {
-        activeIdx = wts.length;
-    }
-    const chars = dom.globalSubtitle.querySelectorAll('.sc');
-    for (let i = 0; i < chars.length; i++) {
-        chars[i].style.color = i === activeIdx ? '#fbbf24' : '';
-    }
+    highlightActiveWord(elapsed);
 }
 
 export function startProgressSync() {
@@ -85,74 +106,33 @@ export function stopProgressSync() {
     }
 }
 
-// ---- Page switching ----
-
-/**
- * 统一翻页入口。普通模式高亮 + 平滑滚动；全屏模式仅显示当前页。
- * @param {number} pageNum  1-based
- * @param {object} [opts]
- * @param {boolean} [opts.updatePlayingPage] 是否同步 currentPlayingPage（音频驱动翻页时传 true）
- * @param {number}  [opts.scrollDelay]       滚动后多长 ms 内抑制 detectCurrentPage（默认 600）
- */
-export function switchToPage(pageNum, { updatePlayingPage = false, scrollDelay = 600 } = {}) {
-    if (updatePlayingPage) {
-        state.currentPlayingPage = pageNum;
-        // 记录页时间映射
-        if (state.pageTimeMap.length > 0 && !state.pageTimeMap[state.pageTimeMap.length - 1].endTime) {
-            state.pageTimeMap[state.pageTimeMap.length - 1].endTime = state.playedTime;
-        }
-        if (state.pageTimeMap.length === 0 || state.pageTimeMap[state.pageTimeMap.length - 1].page !== pageNum) {
-            state.pageTimeMap.push({ page: pageNum, startTime: state.playedTime });
-        }
+// ---- Audio context and queue ----
+export function stopCurrentAudio() {
+    state.playbackEpoch += 1;
+    const source = state.currentAudioSource;
+    const resolve = state.currentAudioResolve;
+    state.currentAudioSource = null;
+    state.currentAudioResolve = null;
+    state.currentAudioEndTime = null;
+    state.currentAudioIsQa = false;
+    if (source) {
+        source.onended = null;
+        try { source.stop(); } catch (e) { }
+        try { source.disconnect(); } catch (e) { }
     }
-    state.currentPage = pageNum;
-    updatePageCounter();
-
-    const pageEl = document.getElementById(`page-wrapper-${pageNum}`);
-    if (!pageEl) return;
-
-    if (document.fullscreenElement) {
-        // 全屏：只显示当前页
-        document.querySelectorAll('.pdf-page-wrapper').forEach(el => {
-            el.style.display = 'none';
-            el.classList.remove('active-page');
-        });
-        pageEl.style.display = 'block';
-        pageEl.classList.add('active-page');
-    } else {
-        // 普通：高亮当前页 + 平滑滚动
-        document.querySelectorAll('.pdf-page-wrapper').forEach(el => el.classList.remove('active-page'));
-        pageEl.classList.add('active-page');
-        state.isAutoScrolling = true;
-        pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        // 平滑滚动结束后恢复标志位
-        if (state._scrollTimer) clearTimeout(state._scrollTimer);
-        state._scrollTimer = setTimeout(() => {
-            state.isAutoScrolling = false;
-            state._scrollTimer = null;
-        }, scrollDelay);
-    }
+    if (resolve) resolve(false);
 }
 
-/** 供 viewer.js 中的 detectCurrentPage 使用 */
-function updatePageCounter() {
-    const counter = document.getElementById('page-counter');
-    if (counter) {
-        counter.textContent = `${state.currentPage} / ${state.totalPages}`;
-    }
-}
-
-export { updatePageCounter };
-
-export function initAudioContext() {
+export function initAudioContext({ resume = true, stopCurrent = true } = {}) {
+    if (stopCurrent) stopCurrentAudio();
     if (!state.audioCtx) {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         state.audioCtx = new AudioContext();
     }
-    if (state.audioCtx.state === 'suspended') {
+    if (resume && state.audioCtx.state === 'suspended') {
         state.audioCtx.resume().catch(e => console.error(e));
     }
-    try {
+    if (resume) try {
         const buffer = state.audioCtx.createBuffer(1, 1, 22050);
         const source = state.audioCtx.createBufferSource();
         source.buffer = buffer;
@@ -162,6 +142,8 @@ export function initAudioContext() {
 
     state.nextPlayTime = state.audioCtx.currentTime + 0.1;
     state.playbackStartTime = state.nextPlayTime;
+    state.currentAudioEndTime = null;
+    state.currentAudioIsQa = false;
     state.audioQueue = [];
     state.isLoading = false;
     _hideLoadingIndicator();
@@ -181,17 +163,43 @@ function base64ToArrayBuffer(base64) {
     return bytes.buffer;
 }
 
-export async function queueAudioChunk(base64Data, page, sentence, duration, wordTimestamps) {
+export async function queueAudioChunk(
+    base64Data,
+    page,
+    sentence,
+    duration,
+    wordTimestamps,
+    { trackTimeline = true, playbackOffset = 0, chunkIndex = null } = {},
+) {
     if (!state.audioCtx) return;
-    const d = duration || 0;
-    if (!state.isQaActive) {
-        state.sentenceStartTimes.push({
+    // The PCM payload is the source of truth. This also prevents a string
+    // duration from turning timelineCursor into a concatenated value.
+    const offset = Number.isFinite(Number(playbackOffset))
+        ? Math.max(0, Number(playbackOffset))
+        : 0;
+    const fullDuration = pcmDuration(base64Data, duration);
+    const d = base64Data
+        ? Math.max(0, fullDuration - offset)
+        : fullDuration;
+    if (!state.isQaActive && trackTimeline) {
+        const normalizedIndex = Number(chunkIndex);
+        const chunkKey = Number.isInteger(normalizedIndex) && normalizedIndex > 0
+            ? `${page}:${normalizedIndex}`
+            : null;
+        if (chunkKey && state.generatedAudioChunkKeys.has(chunkKey)) return;
+        const generatedChunk = {
+            data: base64Data,
             page: page,
-            start: state.liveWindowEnd,
+            start: state.timelineCursor,
             duration: d,
+            sentence: sentence || '',
             wordTimestamps: wordTimestamps || [],
-        });
-        state.liveWindowEnd += d;
+            index: chunkKey ? normalizedIndex : null,
+        };
+        state.generatedAudioChunks.push(generatedChunk);
+        if (chunkKey) state.generatedAudioChunkKeys.add(chunkKey);
+        state.timelineCursor += d;
+        state.liveWindowEnd = Math.max(state.liveWindowEnd, state.timelineCursor);
         dom.progressSlider.max = state.liveWindowEnd;
         dom.timeTotal.textContent = formatTime(state.liveWindowEnd);
     }
@@ -199,6 +207,8 @@ export async function queueAudioChunk(base64Data, page, sentence, duration, word
         data: base64Data, page: page,
         sentence: sentence || '', duration: d,
         wordTimestamps: wordTimestamps || [],
+        isQa: state.isQaActive,
+        playbackOffset: offset,
     });
     if (!state.isProcessingQueue) {
         processAudioQueue();
@@ -206,8 +216,9 @@ export async function queueAudioChunk(base64Data, page, sentence, duration, word
 }
 
 async function processAudioQueue() {
-    if (state.isProcessingQueue || state.audioQueue.length === 0) return;
+    if (state.isProcessingQueue || state.audioQueue.length === 0 || state.isSeeking) return;
     state.isProcessingQueue = true;
+    const processingEpoch = state.playbackEpoch;
 
     // LOADING → PLAYING 自动恢复：新 chunk 已到达
     if (state.isLoading) {
@@ -216,6 +227,7 @@ async function processAudioQueue() {
         if (state.audioCtx && state.audioCtx.state === 'suspended') {
             state.playbackStartTime = state.audioCtx.currentTime;
             await state.audioCtx.resume();
+            if (processingEpoch !== state.playbackEpoch) return;
             startProgressSync();
             _syncPlayPauseIcon();
         }
@@ -223,23 +235,19 @@ async function processAudioQueue() {
 
     while (state.audioQueue.length > 0) {
         const item = state.audioQueue.shift();
-        if (state.isSeeking) break;
 
-        if (!state.isQaActive && item.page !== state.currentPlayingPage) {
+        if (!item.isQa && item.page !== state.currentPlayingPage) {
             switchToPage(item.page, { updatePlayingPage: true });
         }
 
         try {
             if (item.sentence) {
                 // 逐字渲染字幕，用于字级高亮
-                const wts = item.wordTimestamps || [];
+                const wts = expandWordTimestamps(item.wordTimestamps);
                 state.currentWordTimestamps = wts;
-                state.currentSentenceStartTime = state.playedTime;
+                state.currentSentenceStartTime = state.playedTime - (item.playbackOffset || 0);
                 if (wts.length > 0) {
-                    const spans = wts.map((w, i) =>
-                        `<span class="sc" data-idx="${i}" style="transition:color 0.1s;">${w.char}</span>`
-                    ).join('');
-                    dom.globalSubtitle.innerHTML = spans;
+                    renderSentenceSubtitle(item.sentence, wts);
                 } else {
                     dom.globalSubtitle.textContent = item.sentence;
                 }
@@ -256,33 +264,58 @@ async function processAudioQueue() {
 
             const source = state.audioCtx.createBufferSource();
             source.buffer = audioBuffer;
+            source.playbackRate.value = state.playbackRate;
             source.connect(state.audioCtx.destination);
+            const epoch = state.playbackEpoch;
+            const contentDuration = item.duration || audioBuffer.duration;
+            const itemEndTime = item.isQa
+                ? null
+                : state.playedTime + contentDuration;
 
             const now = state.audioCtx.currentTime;
             if (state.nextPlayTime < now) state.nextPlayTime = now;
+            const startAt = state.nextPlayTime;
+            if (!item.isQa) state.playbackStartTime = startAt;
 
-            await new Promise((resolve) => {
+            const completed = await new Promise((resolve) => {
+                state.currentAudioSource = source;
+                state.currentAudioResolve = resolve;
+                state.currentAudioEndTime = itemEndTime;
+                state.currentAudioIsQa = item.isQa;
                 source.onended = () => {
-                    if (!state.isQaActive) {
-                        state.playedTime += item.duration || audioBuffer.duration;
+                    if (state.currentAudioSource === source) {
+                        state.currentAudioSource = null;
+                        state.currentAudioResolve = null;
+                        state.currentAudioEndTime = null;
+                        state.currentAudioIsQa = false;
+                    }
+                    if (epoch === state.playbackEpoch && !item.isQa) {
+                        state.playedTime = itemEndTime;
                         state.playbackStartTime = state.audioCtx.currentTime;
                     }
-                    resolve();
+                    resolve(epoch === state.playbackEpoch);
                 };
-                source.start(state.nextPlayTime);
-                state.nextPlayTime += audioBuffer.duration;
+                source.start(startAt, item.playbackOffset || 0);
+                state.nextPlayTime = startAt + contentDuration / state.playbackRate;
             });
+            if (!completed || epoch !== state.playbackEpoch) break;
         } catch (err) {
             console.error('PCM 音频处理失败:', err);
             await new Promise(resolve => setTimeout(resolve, 100));
+            if (processingEpoch !== state.playbackEpoch) return;
         }
     }
 
+    // A seek starts a replacement processor. The obsolete processor must not
+    // clear its running flag, subtitle, or loading state when it later unwinds.
+    if (processingEpoch !== state.playbackEpoch) return;
+
     // 队列已空 → 进入 LOADING 状态，冻结 currentTime，避免空转
     if (!state.isQaActive && state.audioCtx && !state.isSeeking && state.audioCtx.state === 'running') {
-        state.playedTime += Math.max(0, state.audioCtx.currentTime - state.playbackStartTime);
+        state.playedTime = getCurrentPlaybackTime();
         state.playbackStartTime = state.audioCtx.currentTime;
         await state.audioCtx.suspend();
+        if (processingEpoch !== state.playbackEpoch) return;
         state.isLoading = true;
         _showLoadingIndicator();
         stopProgressSync();
@@ -292,113 +325,92 @@ async function processAudioQueue() {
 
     dom.globalSubtitle.classList.remove('active');
     state.isProcessingQueue = false;
+    if (state.audioQueue.length > 0 && !state.isSeeking) {
+        processAudioQueue();
+    }
 }
 
 // ---- Seek ----
 
+function _findGeneratedChunkIndex(targetSeconds) {
+    const chunks = state.generatedAudioChunks;
+    if (targetSeconds >= state.liveWindowEnd) return chunks.length;
+
+    let lo = 0;
+    let hi = chunks.length - 1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >>> 1;
+        const chunk = chunks[mid];
+        const end = chunk.start + chunk.duration;
+        if (targetSeconds < chunk.start) {
+            hi = mid - 1;
+        } else if (targetSeconds >= end) {
+            lo = mid + 1;
+        } else {
+            return mid;
+        }
+    }
+    return Math.min(lo, chunks.length);
+}
+
 export async function seekToTime(targetSeconds) {
-    if (state.isSeeking || state.sentenceStartTimes.length === 0) return;
+    if (state.isSeeking || state.generatedAudioChunks.length === 0) return;
     targetSeconds = Math.max(0, Math.min(targetSeconds, state.liveWindowEnd));
     state.isSeeking = true;
 
-    // 在 sentenceStartTimes 中二分查找目标时间所属的句子
-    let targetPage = 1;
-    let pageOffset = 0;  // 目标页内，目标句之前的句子累计时长
-
-    const arr = state.sentenceStartTimes;
-    let lo = 0, hi = arr.length - 1, found = -1;
-    while (lo <= hi) {
-        const mid = (lo + hi) >>> 1;
-        const s = arr[mid].start;
-        const e = s + arr[mid].duration;
-        if (targetSeconds >= s && targetSeconds < e) { found = mid; break; }
-        if (targetSeconds < s) hi = mid - 1;
-        else lo = mid + 1;
-    }
-    if (found === -1) found = Math.min(lo, arr.length - 1);
-
-    targetPage = arr[found].page;
-    // 计算该页内此句之前的累计偏移
-    for (let i = found - 1; i >= 0 && arr[i].page === targetPage; i--) {
-        pageOffset += arr[i].duration;
-    }
-
-    if (state.seekAbortController) {
-        state.seekAbortController.abort();
-    }
-    if (state.currentEventSource) {
-        try { state.currentEventSource.close(); } catch (e) { }
-        state.currentEventSource = null;
-    }
-
-    state.audioQueue = [];
-    dom.globalSubtitle.classList.remove('active');
-    dom.globalSubtitle.innerHTML = '';
-    state.currentWordTimestamps = [];
-    state.currentSentenceStartTime = 0;
-    initAudioContext();
-    state.isSeeking = false;  // 旧队列已清空，允许新的 processAudioQueue 运行
-    if (state.audioCtx.state === 'suspended') {
-        await state.audioCtx.resume();
-    }
-    state.nextPlayTime = state.audioCtx.currentTime + 0.1;
-    state.playbackStartTime = state.nextPlayTime;
-    stopProgressSync();
-
-    const fileId = getQueryParam('file_id');
-    if (!fileId) { state.isSeeking = false; return; }
-
-    switchToPage(targetPage, { updatePlayingPage: true });
-
-    state.seekAbortController = new AbortController();
-
     try {
-        const url = `/explain/playback/seek/${fileId}/page/${targetPage}?time_offset=${encodeURIComponent(pageOffset.toFixed(2))}`;
-        const resp = await fetch(url, { signal: state.seekAbortController.signal });
-        if (!resp.ok) {
-            console.error('seek 请求失败:', resp.status);
-            state.isSeeking = false;
-            return;
-        }
+        // Seeking is a local DVR operation. Keep the live EventSource open so
+        // dragging cannot request or synthesize audio that has not arrived yet.
+        stopCurrentAudio();
+        state.audioQueue = [];
+        state.currentWordTimestamps = [];
+        state.currentSentenceStartTime = null;
+        state.playedTime = targetSeconds;
+        if (dom.progressSlider) dom.progressSlider.value = targetSeconds;
+        if (dom.timeCurrent) dom.timeCurrent.textContent = formatTime(targetSeconds);
 
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buf = '';
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            const parts = buf.split('\n\n');
-            buf = parts.pop();
-            for (const part of parts) {
-                const line = part.split('\n').map(l => l.replace(/^data:\s*/, '')).join('\n');
-                if (!line || line === '[DONE]') continue;
-                try {
-                    const payload = JSON.parse(line);
-                    if (payload.type === 'audio' && payload.data) {
-                        queueAudioChunk(payload.data, payload.page || targetPage, payload.sentence, payload.duration || 0, payload.word_timestamps || []);
-                    } else if (payload.type === 'error') {
-                        console.error('seek error:', payload.message);
-                    }
-                } catch (e) {
-                    console.error('解析 seek 流数据出错', e, line);
-                }
-            }
-        }
-
-        // 从目标句的开始时间恢复 playedTime
-        state.playedTime = arr[found].start;
+        initAudioContext({ resume: true, stopCurrent: false });
+        if (state.audioCtx.state === 'suspended') await state.audioCtx.resume();
+        // Audio may have arrived while resume() was pending. It is already in
+        // generatedAudioChunks, so rebuild the queue from that canonical cache.
+        state.audioQueue = [];
+        const chunks = state.generatedAudioChunks;
+        const targetIndex = _findGeneratedChunkIndex(targetSeconds);
+        const targetChunk = chunks[targetIndex] || chunks[chunks.length - 1];
+        state.nextPlayTime = state.audioCtx.currentTime + 0.1;
         state.playbackStartTime = state.nextPlayTime;
-        startProgressSync();
 
-        // 启动后续页面的 SSE 讲解流，确保 seek 后讲解持续生成
-        continueExplainStream(targetPage + 1);
-    } catch (e) {
-        if (e.name === 'AbortError') return;
-        console.error('seek 请求异常:', e);
+        if (targetChunk) {
+            state.currentPlayingPage = targetChunk.page;
+            switchToPage(targetChunk.page);
+        }
+
+        // processAudioQueue deliberately ignores work while isSeeking is true.
+        // Release the flag before enqueuing the cached replay range.
+        state.isSeeking = false;
+        for (let i = targetIndex; i < chunks.length; i++) {
+            const chunk = chunks[i];
+            const offset = i === targetIndex
+                ? Math.max(0, targetSeconds - chunk.start)
+                : 0;
+            const remainingDuration = Math.max(0, chunk.duration - offset);
+            if (remainingDuration <= 0) continue;
+            queueAudioChunk(
+                chunk.data,
+                chunk.page,
+                chunk.sentence,
+                remainingDuration,
+                chunk.wordTimestamps,
+                {
+                    trackTimeline: false,
+                    playbackOffset: offset,
+                    chunkIndex: chunk.index,
+                },
+            );
+        }
+        startProgressSync();
+        updateProgressUI();
     } finally {
-        state.seekAbortController = null;
         state.isSeeking = false;
     }
 }
@@ -432,7 +444,8 @@ export function setupPlayerControls() {
             dom.pauseIcon.style.display = 'block';
             startProgressSync();
         } else {
-            state.playedTime += Math.max(0, state.audioCtx.currentTime - state.playbackStartTime);
+            state.playedTime = getCurrentPlaybackTime();
+            state.playbackStartTime = state.audioCtx.currentTime;
             await state.audioCtx.suspend();
             dom.playIcon.style.display = 'block';
             dom.pauseIcon.style.display = 'none';
@@ -444,7 +457,14 @@ export function setupPlayerControls() {
     dom.progressSlider.addEventListener('input', (e) => {
         state.isDragging = true;
         const t = parseFloat(e.target.value);
-        if (!isNaN(t)) dom.timeCurrent.textContent = formatTime(t);
+        if (!isNaN(t)) {
+            dom.timeCurrent.textContent = formatTime(t);
+            const pct = state.liveWindowEnd > 0
+                ? Math.min(100, Math.max(0, t / state.liveWindowEnd * 100))
+                : 0;
+            e.target.style.background =
+                `linear-gradient(to right, #4f46e5 0%, #4f46e5 ${pct}%, #e2e8f0 ${pct}%, #e2e8f0 100%)`;
+        }
     });
 
     dom.progressSlider.addEventListener('change', (e) => {
@@ -453,23 +473,46 @@ export function setupPlayerControls() {
         if (!isNaN(t) && t >= 0) seekToTime(t);
     });
 
+    if (dom.playbackRate) {
+        dom.playbackRate.value = String(state.playbackRate);
+        dom.playbackRate.addEventListener('change', (event) => {
+            setPlaybackRate(event.target.value);
+        });
+    }
+
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'ArrowRight') {
-            if (state.sentenceStartTimes.length === 0) return;
+        const target = e.target;
+        const isPlayerControl = target === dom.playbackRate || target === dom.progressSlider;
+        const isEditing = target instanceof HTMLElement && (
+            target.isContentEditable ||
+            ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+        ) && !isPlayerControl;
+        if (isEditing || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+
+        if (e.shiftKey) {
             e.preventDefault();
-            const now = state.audioCtx ? state.audioCtx.currentTime : 0;
-            const elapsed = state.playedTime + Math.max(0, now - state.playbackStartTime);
-            const target = Math.min(elapsed + 5, state.liveWindowEnd);
-            console.log(`ArrowRight: elapsed=${elapsed.toFixed(1)} target=${target.toFixed(1)} window=${state.liveWindowEnd.toFixed(1)}`);
-            seekToTime(target);
-        } else if (e.key === 'ArrowLeft') {
-            if (state.sentenceStartTimes.length === 0) return;
-            e.preventDefault();
-            const now = state.audioCtx ? state.audioCtx.currentTime : 0;
-            const elapsed = state.playedTime + Math.max(0, now - state.playbackStartTime);
-            const target = Math.max(0, elapsed - 5);
-            console.log(`ArrowLeft: elapsed=${elapsed.toFixed(1)} target=${target.toFixed(1)}`);
-            seekToTime(target);
+            if (e.repeat) return;
+            const currentIndex = PLAYBACK_RATES.indexOf(state.playbackRate);
+            const direction = e.key === 'ArrowRight' ? 1 : -1;
+            const nextIndex = Math.max(
+                0,
+                Math.min(PLAYBACK_RATES.length - 1, currentIndex + direction),
+            );
+            setPlaybackRate(PLAYBACK_RATES[nextIndex]);
+            return;
         }
+
+        if (
+            state.generatedAudioChunks.length === 0 ||
+            state.isSeeking
+        ) return;
+        e.preventDefault();
+        const elapsed = getCurrentPlaybackTime();
+        const seekDelta = e.key === 'ArrowRight' ? 5 : -5;
+        const seekTarget = Math.max(
+            0,
+            Math.min(state.liveWindowEnd, elapsed + seekDelta),
+        );
+        seekToTime(seekTarget);
     });
 }

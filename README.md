@@ -8,12 +8,13 @@ PDFVox 将 PDF/PPT 课程讲义自动转化为第一人称 AI 教授的口语化
 
 ## 功能
 
-- **流式讲解**：SSE 推送，LLM + TTS 并发，首字延迟 < 1s
-- **DVR 时间轴**：仿直播播放器的进度条，句级精确拖动回退
+- **流式讲解**：SSE 推送，LLM + TTS 并发，尽早开始播放首句
+- **DVR 时间轴**：仿直播播放器的进度条，支持句内精确拖动和跳转
 - **字级字幕高亮**：逐字 `<span>` 渲染，当前朗读的字实时高亮
 - **语音问答**：录音 → ASR 转写 → LLM 流式回答 → TTS 语音播放
 - **多轮对话**：同一 PDF 内支持 5 轮追问
 - **沉浸模式**：全屏 PPT + 字幕叠加，左右方向键 ±5s 跳转
+- **倍速播放**：支持 0.5x、0.75x、1x、1.25x、1.5x、2x，`Shift+←/→` 逐档调节
 
 ## 项目结构
 
@@ -32,7 +33,10 @@ PDFVox/
 │   │   ├── ai_explain.py         # GET  /explain/...   流式讲解 / seek / cancel
 │   │   └── qa.py                 # POST /qa/ask/stream 流式问答
 │   ├── services/
-│   │   ├── explain_service.py    # 讲解编排：摘要缓存、LLM+TTS 双流
+│   │   ├── runtime.py            # 路由共享的进程级服务实例
+│   │   ├── explain_service.py    # 讲解流程编排：摘要、LLM/TTS 双流和取消
+│   │   ├── explain_audio.py      # 页面音频生成与缓存策略
+│   │   ├── explain_prompts.py    # 摘要及讲解提示词构建
 │   │   ├── qa_service.py         # 问答服务：多轮历史、prompt 构建
 │   │   ├── llm_service.py        # 火山引擎 doubao 多模态 API
 │   │   ├── tts_service.py        # 火山引擎双向 WebSocket TTS
@@ -48,7 +52,10 @@ PDFVox/
 │   └── static/
 │       ├── viewer.js             # 入口：PDF 加载、全屏、模块组装
 │       ├── viewer-state.js       # 共享状态 / DOM 引用
-│       ├── viewer-audio.js       # Web Audio 播放、DVR 进度、seek、字级高亮
+│       ├── viewer-audio.js       # Web Audio 播放、队列、进度控制与 seek
+│       ├── viewer-timeline.js    # 音频时长和页面时间轴查询
+│       ├── viewer-subtitles.js   # 完整字幕渲染与字级高亮
+│       ├── viewer-pages.js       # PDF 页面切换和计数器
 │       └── viewer-stream.js      # SSE 流处理、按钮状态机、录音问答
 ├── .env.example                  # 环境变量模板
 └── requirements.txt
@@ -71,10 +78,12 @@ cp .env.example .env
 编辑 `.env`：
 
 ```env
-API_KEY=your_volcengine_api_key
-ACCESS_TOKEN=your_volcengine_access_token
-API_APP_KEY=your_volcengine_app_key
+LLM_API_KEY=your_volcengine_ark_api_key
+TTS_API_KEY=your_volcengine_speech_api_key
+TTS_API_RESOURCE_ID=seed-tts-2.0
 TTS_VOICE=zh_female_yingyujiaoxue_uranus_bigtts
+STORAGE_PATH=output
+MAX_UPLOAD_SIZE_MB=50
 LOG_LEVEL=INFO
 LOG_TO_CONSOLE=true
 ```
@@ -86,6 +95,17 @@ python run.py
 ```
 
 浏览器访问 `http://localhost:8000`。
+
+所有相对路径配置都以项目根目录为基准，因此也可以从其他工作目录启动。
+
+### 4. 运行测试
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+自动化测试只收集 `tests/`。`scripts/` 中依赖麦克风、模型或外部服务的脚本需要手动运行。
 
 ## 日志控制
 
@@ -104,8 +124,11 @@ LOG_LEVEL=ERROR python run.py
 | 模块 | 行数 | 职责 |
 |------|------|------|
 | `viewer.js` | ~180 | 入口：DOM 引用初始化、PDF 加载、全屏 |
-| `viewer-state.js` | ~40 | 所有共享状态 + DOM 引用 |
-| `viewer-audio.js` | ~350 | 音频播放、队列、DVR 时间轴、seek、字级字幕 |
+| `viewer-state.js` | ~50 | 所有共享状态 + DOM 引用 |
+| `viewer-audio.js` | ~510 | 音频播放、队列、DVR 进度控制与 seek |
+| `viewer-timeline.js` | ~30 | PCM 时长计算和页面音频起点查询 |
+| `viewer-subtitles.js` | ~90 | 完整字幕渲染和字级高亮 |
+| `viewer-pages.js` | ~55 | 页面切换、滚动和页码显示 |
 | `viewer-stream.js` | ~400 | SSE 流（全页讲解、恢复讲解、录音提问）、按钮状态机 |
 
 使用 ES 模块（`type="module"`），无需构建工具。

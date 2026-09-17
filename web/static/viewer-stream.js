@@ -1,5 +1,5 @@
 import { state, dom, getQueryParam } from './viewer-state.js';
-import { initAudioContext, queueAudioChunk, startProgressSync, formatTime } from './viewer-audio.js';
+import { initAudioContext, queueAudioChunk, startProgressSync, stopCurrentAudio } from './viewer-audio.js';
 
 // ---- 按钮状态机 ----
 
@@ -47,8 +47,10 @@ function _startExplainStream(courseName, { skipReset = false } = {}) {
         // DVR 窗口重置（每次启动新流都重置）
         state.playedTime = 0;
         state.liveWindowEnd = 0;
+        state.timelineCursor = 0;
+        state.generatedAudioChunks = [];
+        state.generatedAudioChunkKeys.clear();
         state.pageTimeMap = [];
-        state.sentenceStartTimes = [];
         dom.progressSlider.max = 0;
         dom.progressSlider.value = 0;
         dom.timeTotal.textContent = '00:00';
@@ -68,7 +70,18 @@ function _startExplainStream(courseName, { skipReset = false } = {}) {
 
     let isCancelled = false;
 
-    const streamUrl = `/explain/all-stream-v3/${fileId}?course_name=${encodeURIComponent(courseName)}&from_page=${fromPage}`;
+    const streamParams = new URLSearchParams({
+        course_name: courseName,
+        from_page: String(fromPage),
+        session_id: state.sessionId,
+    });
+    if (skipReset) {
+        const generatedOnResumePage = state.generatedAudioChunks
+            .filter(chunk => chunk.page === fromPage).length;
+        streamParams.set('skip_sentences', String(generatedOnResumePage));
+        streamParams.set('resume_generation', 'true');
+    }
+    const streamUrl = `/explain/all-stream-v3/${fileId}?${streamParams}`;
     state.currentEventSource = new EventSource(streamUrl);
     const es = state.currentEventSource;
 
@@ -86,6 +99,9 @@ function _startExplainStream(courseName, { skipReset = false } = {}) {
 
         try {
             const payload = JSON.parse(event.data);
+            if (payload.task_id) {
+                localStorage.setItem('pdfvox:lastTaskId', payload.task_id);
+            }
             switch (payload.type) {
                 case 'page_start':
                     _setExplainButton(BTN_GENERATING, `AI 正在构思第 ${payload.page} 页…`);
@@ -93,7 +109,14 @@ function _startExplainStream(courseName, { skipReset = false } = {}) {
                 case 'audio':
                     if (payload.data) {
                         _setExplainButton(BTN_GENERATING, `正在生成第 ${payload.page} 页语音…`);
-                        queueAudioChunk(payload.data, payload.page, payload.sentence, payload.duration || 0, payload.word_timestamps || []);
+                        queueAudioChunk(
+                            payload.data,
+                            payload.page,
+                            payload.sentence,
+                            payload.duration || 0,
+                            payload.word_timestamps || [],
+                            { chunkIndex: payload.index },
+                        );
                     }
                     break;
                 case 'end':
@@ -122,7 +145,8 @@ function _startExplainStream(courseName, { skipReset = false } = {}) {
     // 返回取消函数
     return async () => {
         isCancelled = true;
-        try { await fetch(`/explain/cancel/${fileId}`, { method: 'DELETE' }); } catch (e) { }
+        const cancelUrl = `/explain/cancel/${fileId}?session_id=${encodeURIComponent(state.sessionId)}`;
+        try { await fetch(cancelUrl, { method: 'DELETE' }); } catch (e) { }
         if (es) es.close();
         if (state.currentEventSource) { state.currentEventSource.close(); state.currentEventSource = null; }
     };
@@ -152,7 +176,7 @@ export function setupExplainAllButton() {
             }
             case BTN_PAUSED: {
                 // 继续生成
-                _cancelFn = await _startExplainStream(courseName);
+                _cancelFn = await _startExplainStream(courseName, { skipReset: true });
                 break;
             }
         }
@@ -161,7 +185,7 @@ export function setupExplainAllButton() {
 
 // ---- 恢复讲解（从问答返回时调用） ----
 
-export async function resumeExplanation(fileId, courseName) {
+async function resumeExplanation(courseName) {
     state.isQaActive = false;
     dom.progressSlider.disabled = false;
     _cancelFn = await _startExplainStream(courseName);
@@ -189,6 +213,7 @@ export function setupAskButton() {
         state.isQaActive = true;
 
         if (state.currentEventSource) { try { state.currentEventSource.close(); } catch (e) { } state.currentEventSource = null; }
+        stopCurrentAudio();
         if (state.audioCtx) try { await state.audioCtx.suspend(); } catch (e) { }
         if (dom.playIcon && dom.pauseIcon) {
             dom.playIcon.style.display = 'block';
@@ -197,7 +222,7 @@ export function setupAskButton() {
         state.audioQueue = [];
         state.isProcessingQueue = false;
 
-        initAudioContext();
+        initAudioContext({ resume: false, stopCurrent: false });
         dom.progressSlider.disabled = true;
 
         const originalText = dom.askBtn.textContent;
@@ -245,6 +270,8 @@ export function setupAskButton() {
             progressContainer.remove();
             dom.askBtn.textContent = originalText;
             dom.askBtn.disabled = false;
+            state.isQaActive = false;
+            dom.progressSlider.disabled = false;
             return;
         }
 
@@ -291,6 +318,8 @@ export function setupAskButton() {
             form.append('file', wavBlob, 'question.wav');
             form.append('file_id', fileId);
             form.append('page_num', String(state.currentPage || 1));
+            form.append('session_id', state.sessionId);
+            form.append('course_name', courseName || '课程');
 
             const ac = new AbortController();
             state.currentStreamAbort = ac;
@@ -323,7 +352,7 @@ export function setupAskButton() {
                             `;
                             document.getElementById('resume-stream').addEventListener('click', () => {
                                 progressContainer.remove();
-                                resumeExplanation(fileId, courseName, progressContainer);
+                                resumeExplanation(courseName);
                             });
                             document.getElementById('qa-done-close').addEventListener('click', () => {
                                 progressContainer.remove();
@@ -371,7 +400,7 @@ async function _convertBlobTo16kWav(blob) {
     const offlineCtx = new OfflineAudioContext(1, Math.ceil(audioBuffer.duration * targetRate), targetRate);
     const src = offlineCtx.createBufferSource();
     const mono = offlineCtx.createBuffer(1, audioBuffer.length, audioBuffer.sampleRate);
-    const channelData = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(0) : audioBuffer.getChannelData(0);
+    const channelData = audioBuffer.getChannelData(0);
     mono.copyToChannel(channelData, 0);
     src.buffer = mono;
     src.connect(offlineCtx.destination);
@@ -383,11 +412,15 @@ async function _convertBlobTo16kWav(blob) {
 function _encodeWAV(samples, sampleRate) {
     const buffer = new ArrayBuffer(44 + samples.length * 2);
     const view = new DataView(buffer);
-    const _ws = (v, o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
-    _ws(view, 0, 'RIFF');
+    const _ws = (offset, value) => {
+        for (let i = 0; i < value.length; i++) {
+            view.setUint8(offset + i, value.charCodeAt(i));
+        }
+    };
+    _ws(0, 'RIFF');
     view.setUint32(4, 36 + samples.length * 2, true);
-    _ws(view, 8, 'WAVE');
-    _ws(view, 12, 'fmt ');
+    _ws(8, 'WAVE');
+    _ws(12, 'fmt ');
     view.setUint32(16, 16, true);
     view.setUint16(20, 1, true);
     view.setUint16(22, 1, true);
@@ -395,7 +428,7 @@ function _encodeWAV(samples, sampleRate) {
     view.setUint32(28, sampleRate * 2, true);
     view.setUint16(32, 2, true);
     view.setUint16(34, 16, true);
-    _ws(view, 36, 'data');
+    _ws(36, 'data');
     view.setUint32(40, samples.length * 2, true);
     for (let i = 0, offset = 44; i < samples.length; i++, offset += 2) {
         const s = Math.max(-1, Math.min(1, samples[i]));

@@ -1,4 +1,6 @@
-from openai import OpenAI, AsyncOpenAI
+import time
+
+from openai import AsyncOpenAI, OpenAI
 
 from app.config import settings
 from app.utils.logging import get_logger
@@ -11,18 +13,31 @@ class LLMService:
 
     def __init__(self):
         self.client = OpenAI(
-            base_url="https://ark.cn-beijing.volces.com/api/v3",
-            api_key=settings.API_KEY,
+            base_url=settings.LLM_BASE_URL,
+            api_key=settings.LLM_API_KEY,
         )
         # 【新增】专门为流式并发准备的异步客户端
         self.async_client = AsyncOpenAI(
-            base_url="https://ark.cn-beijing.volces.com/api/v3",
-            api_key=settings.API_KEY,
+            base_url=settings.LLM_BASE_URL,
+            api_key=settings.LLM_API_KEY,
         )
 
-    def generate_explanation(
-        self, system_prompt, user_prompt, image_base64=None, max_tokens=800
-    ):
+    @staticmethod
+    def _extract_response_text(response):
+        """Extract text without assuming a fixed Responses API output index."""
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return str(output_text)
+
+        parts = []
+        for item in getattr(response, "output", []) or []:
+            for content in getattr(item, "content", []) or []:
+                text = getattr(content, "text", None)
+                if text:
+                    parts.append(str(text))
+        return "".join(parts)
+
+    def generate_explanation(self, system_prompt, user_prompt, max_tokens=800):
         """Send a streaming chat request and collect the result as text."""
         try:
             logger.info("开始生成讲解，准备API调用")
@@ -70,22 +85,14 @@ class LLMService:
             # 使用火山引擎API
             logger.info("正在调用火山引擎API")
             response = self.client.responses.create(
-                model="doubao-seed-2-0-pro-260215",
+                model=settings.LLM_MODEL,
                 input=input_messages,
+                max_output_tokens=max_tokens,
             )
             logger.info("API调用成功")
 
             # 提取响应内容
-            explanation = ""
-
-            item = response.output[1]
-            if hasattr(item, "content") and isinstance(item.content, list):
-                for content_item in item.content:
-                    if hasattr(content_item, "text"):
-                        explanation += content_item.text
-                        logger.info(
-                            f"从content的text属性提取到文本: {content_item.text[:100]}..."
-                        )
+            explanation = self._extract_response_text(response)
 
             logger.info(f"最终提取响应内容，长度: {len(explanation)}")
 
@@ -95,11 +102,9 @@ class LLMService:
             raise
 
     async def stream_explanation(
-        self, system_prompt, user_prompt, page_num=1, image_base64=None, max_tokens=800
+        self, system_prompt, user_prompt, page_num=1, max_tokens=800
     ):
         """流式生成讲解，返回统一事件流 - 与TTS增量输入接口对齐"""
-        import time
-
         try:
             logger.info(f"开始流式生成讲解，页面: {page_num}")
 
@@ -152,9 +157,10 @@ class LLMService:
             # 使用OpenAI聊天补全接口（流式）
             logger.info("正在调用OpenAI聊天补全API（流式）")
             response = await self.async_client.chat.completions.create(
-                model="doubao-seed-1-8-251228",
+                model=settings.LLM_MODEL,
                 messages=input_messages,
                 stream=True,  # 启用流式输出
+                max_tokens=max_tokens,
             )
             logger.info("API调用成功，开始流式接收")
 

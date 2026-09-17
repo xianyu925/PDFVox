@@ -342,12 +342,9 @@
             transition: opacity 0.4s ease, transform 0.4s ease;
             transform: translate(-50%, 20px);
 
-            /* 保持最多显示两行，超出隐藏 */
-            max-height: 120px;
-            overflow: hidden;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
+            /* 字幕必须显示完整句子，长句允许自然换行。 */
+            max-height: none;
+            overflow: visible;
         }
 
         .global-subtitle.active {
@@ -410,6 +407,16 @@
             <input id="progress-slider" type="range" min="0" value="0" step="0.05"
                 style="flex:1; vertical-align:middle;" />
             <span id="time-total" style="font-size:11px; color:var(--text-muted); min-width:36px; flex-shrink:0;">00:00</span>
+            <select id="playback-rate" title="播放倍速（Shift+左/右方向键调节）"
+                aria-label="播放倍速"
+                style="height:30px; border:1px solid var(--border-color); border-radius:6px; background:white; color:var(--text-main); font-size:11px; cursor:pointer; flex-shrink:0;">
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2.0x</option>
+            </select>
             <svg id="loading-spinner" class="rotate-spinner" style="display:none; width:14px; height:14px; flex-shrink:0; color:#4f46e5; animation:spin 0.8s linear infinite;" viewBox="0 0 24 24" fill="none">
                 <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-opacity="0.2"/>
                 <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>

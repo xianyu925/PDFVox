@@ -9,3 +9,5 @@ __pycache__/
 .trae/
 scripts/
 /log.txt
+/doc/
+/.pytest_cache/

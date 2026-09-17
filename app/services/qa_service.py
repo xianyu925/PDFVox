@@ -1,10 +1,18 @@
-import asyncio
+from __future__ import annotations
 
-from app.models.db import get_upload
-from app.services.llm_service import LLMService
-from app.services.tts_service import TTSService
-from app.services.explain_service import ExplainService
+import asyncio
+import hashlib
+from typing import TYPE_CHECKING
+
+from app.config import settings
+from app.models.db import get_generated_cache, get_upload, save_generated_cache
+from app.services.cache import TTLCache
 from app.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from app.services.explain_service import ExplainService
+    from app.services.llm_service import LLMService
+    from app.services.tts_service import TTSService
 
 logger = get_logger(__name__)
 
@@ -44,31 +52,57 @@ class QAService:
         self._llm = llm_service
         self._tts = tts_service
         self._explain = explain_service
-        self._history: dict[str, list] = {}
+        self._history = TTLCache(
+            settings.QA_HISTORY_MAX_DOCUMENTS, settings.CACHE_TTL_SECONDS
+        )
 
     # ---- 对话历史 ----
 
-    def add_history(self, file_id: str, question: str, answer: str) -> None:
-        if file_id not in self._history:
-            self._history[file_id] = []
-        self._history[file_id].append({"question": question, "answer": answer})
-        if len(self._history[file_id]) > 5:
-            self._history[file_id] = self._history[file_id][-5:]
+    @staticmethod
+    def _history_key(file_id: str, session_id: str) -> str:
+        digest = hashlib.sha256(f"{file_id}\0{session_id}".encode()).hexdigest()
+        return f"qa_history:{digest}"
+
+    async def _get_history(self, file_id: str, session_id: str) -> list:
+        key = self._history_key(file_id, session_id)
+        rounds = self._history.get(key)
+        if rounds is None:
+            rounds = await asyncio.to_thread(get_generated_cache, key) or []
+            self._history[key] = rounds
+        return list(rounds)
+
+    async def add_history(
+        self, file_id: str, question: str, answer: str,
+        session_id: str = "default"
+    ) -> None:
+        key = self._history_key(file_id, session_id)
+        rounds = await self._get_history(file_id, session_id)
+        rounds.append({"question": question, "answer": answer})
+        rounds = rounds[-5:]
+        self._history[key] = rounds
+        await asyncio.to_thread(
+            save_generated_cache,
+            key,
+            "qa_history",
+            rounds,
+            settings.CACHE_TTL_SECONDS,
+            settings.GENERATED_CACHE_MAX_ENTRIES,
+        )
         logger.info(
-            f"[QA多轮] 已保存第 {len(self._history[file_id])} 轮对话 | "
+            f"[QA多轮] 已保存第 {len(rounds)} 轮对话 | "
             f"Q: {question[:50]}... → A: {answer[:50]}..."
         )
 
-    def _history_text(self, file_id: str) -> str:
-        rounds = self._history.get(file_id, [])
+    async def _history_text(self, file_id: str, session_id: str) -> tuple[str, int]:
+        rounds = await self._get_history(file_id, session_id)
         if not rounds:
-            return ""
+            return "", 0
         lines = ["以下是之前的对话历史："]
         for r in rounds:
             lines.append(f"学生问：{r['question']}")
             lines.append(f"老师答：{r['answer']}")
         lines.append("---")
-        return "\n".join(lines)
+        return "\n".join(lines), len(rounds)
 
     # ---- 页面图片 ----
 
@@ -84,16 +118,17 @@ class QAService:
 
     # ---- 讲稿缓存收集 ----
 
-    def _get_all_scripts(
-        self, file_id: str, current_page: int
+    async def _get_all_scripts(
+        self, file_id: str, current_page: int, course_name: str = "课程"
     ) -> dict[int, str]:
         """收集第1页到当前页之间所有已缓存的完整讲稿，按页码排序返回。"""
-        cache = self._explain.summary_cache.get(file_id, {})
         scripts: dict[int, str] = {}
         for page in range(1, current_page + 1):
-            key = f"script_{file_id}_{page}"
-            if key in cache and cache[key]:
-                scripts[page] = cache[key]
+            script = await self._explain.get_cached_script(
+                file_id, page, course_name
+            )
+            if script:
+                scripts[page] = script
         if scripts:
             logger.info(
                 f"[QA讲稿收集] file_id={file_id} 共找到 {len(scripts)} 页已缓存讲稿: "
@@ -103,16 +138,17 @@ class QAService:
 
     # ---- 提示词构建 ----
 
-    def _build_prompt(
+    async def _build_prompt(
         self,
         file_id: str,
         page_num: int,
         user_question: str,
+        session_id: str,
+        course_name: str,
     ) -> tuple[str, list[dict]]:
         """返回 (system_prompt, user_prompt)，自动处理讲稿缓存与QA历史。"""
-        scripts = self._get_all_scripts(file_id, page_num)
-        history = self._history_text(file_id)
-        history_rounds = len(self._history.get(file_id, []))
+        scripts = await self._get_all_scripts(file_id, page_num, course_name)
+        history, history_rounds = await self._history_text(file_id, session_id)
 
         if history_rounds:
             logger.info(
@@ -160,10 +196,11 @@ class QAService:
     # ---- 流式问答主流程 ----
 
     async def stream_qa_response(
-        self, file_id: str, page_num: int, user_question: str
+        self, file_id: str, page_num: int, user_question: str,
+        session_id: str = "default", course_name: str = "课程"
     ):
         """编排完整的流式问答：上下文→LLM→TTS，yield 统一事件。"""
-        upload = get_upload(file_id)
+        upload = await asyncio.to_thread(get_upload, file_id)
         if not upload or not upload.get("path"):
             yield {"type": "error", "message": "无法找到 file_id 对应记录"}
             return
@@ -172,8 +209,8 @@ class QAService:
             upload.get("path"), page_num
         )
 
-        system_prompt, user_prompt = self._build_prompt(
-            file_id, page_num, user_question
+        system_prompt, user_prompt = await self._build_prompt(
+            file_id, page_num, user_question, session_id, course_name
         )
 
         # 在多模态 prompt 中插入页面图像（放在讲稿之前、问题之后）
@@ -196,10 +233,11 @@ class QAService:
                     await out_queue.put(event)
                     if event.get("type") == "text":
                         await text_queue.put(event.get("data"))
-                await text_queue.put("<END>")
             except Exception as e:
                 logger.error(f"LLM 流式任务异常: {e}", exc_info=True)
                 await out_queue.put({"type": "error", "message": str(e)})
+            finally:
+                await text_queue.put("<END>")
 
         async def run_tts():
             try:
@@ -242,4 +280,6 @@ class QAService:
                 tts_task.cancel()
 
         if full_answer:
-            self.add_history(file_id, user_question, full_answer)
+            await self.add_history(
+                file_id, user_question, full_answer, session_id
+            )

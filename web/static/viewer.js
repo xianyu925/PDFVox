@@ -1,5 +1,7 @@
 import { state, dom, getQueryParam } from './viewer-state.js';
-import { setupPlayerControls, updateProgressUI, stopProgressSync, switchToPage, updatePageCounter } from './viewer-audio.js';
+import { seekToTime, setupPlayerControls } from './viewer-audio.js';
+import { getPageAudioStart } from './viewer-timeline.js';
+import { switchToPage, updatePageCounter } from './viewer-pages.js';
 import { setupExplainAllButton, setupAskButton } from './viewer-stream.js';
 
 // ---- DOM 引用初始化 ----
@@ -19,7 +21,23 @@ dom.playIcon = document.getElementById('play-icon');
 dom.pauseIcon = document.getElementById('pause-icon');
 dom.timeCurrent = document.getElementById('time-current');
 dom.timeTotal = document.getElementById('time-total');
+dom.playbackRate = document.getElementById('playback-rate');
 dom.loadingSpinner = document.getElementById('loading-spinner');
+
+// 双击 PDF 页面时跳转到该页已生成音频的起点。
+pdfPreview.addEventListener('dblclick', (event) => {
+    const wrapper = event.target.closest?.('.pdf-page-wrapper');
+    if (!wrapper || !pdfPreview.contains(wrapper)) return;
+
+    const pageNum = Number(wrapper.id.replace('page-wrapper-', ''));
+    const pageStart = getPageAudioStart(pageNum);
+    event.preventDefault();
+    if (pageStart === null) {
+        alert('音频还在生成中...');
+        return;
+    }
+    seekToTime(pageStart);
+});
 
 // ---- 左侧面板宽度调节 ----
 
@@ -172,8 +190,13 @@ async function loadEntirePDF() {
 
         document.getElementById('pdf-container').addEventListener('scroll', detectCurrentPage);
 
+        const loadedPages = new Set();
+        const pageLoads = new Map();
         const loadSinglePage = async (pageNum) => {
-            try {
+            if (loadedPages.has(pageNum)) return true;
+            if (pageLoads.has(pageNum)) return pageLoads.get(pageNum);
+            const loadPromise = (async () => {
+              try {
                 const pageResp = await fetch(`/pdf/${fileId}/page/${pageNum}`);
                 if (!pageResp.ok) throw new Error('网络请求异常');
                 const pageData = await pageResp.json();
@@ -181,34 +204,64 @@ async function loadEntirePDF() {
                 const spinnerEl = document.getElementById(`spinner-${pageNum}`);
                 const wrapperEl = document.getElementById(`page-wrapper-${pageNum}`);
                 if (imgEl && spinnerEl && pageData.image_url) {
-                    const tempImg = new Image();
-                    tempImg.src = pageData.image_url;
-                    tempImg.onload = () => {
-                        imgEl.src = pageData.image_url;
-                        imgEl.style.display = 'block';
-                        spinnerEl.style.display = 'none';
-                        wrapperEl.style.minHeight = 'auto';
-                    };
+                    await new Promise((resolve, reject) => {
+                        const tempImg = new Image();
+                        tempImg.onload = resolve;
+                        tempImg.onerror = () => reject(new Error('Image decode failed'));
+                        tempImg.src = pageData.image_url;
+                    });
+                    imgEl.src = pageData.image_url;
+                    imgEl.style.display = 'block';
+                    spinnerEl.style.display = 'none';
+                    wrapperEl.style.minHeight = 'auto';
+                    loadedPages.add(pageNum);
+                    return true;
                 } else {
                     throw new Error("缺少图片数据");
                 }
             } catch (err) {
                 const spinnerEl = document.getElementById(`spinner-${pageNum}`);
-                if (spinnerEl) spinnerEl.innerHTML = `<span style="color:#ef4444;">第 ${pageNum} 页加载失败</span>`;
+                if (spinnerEl) {
+                    const message = document.createElement('span');
+                    message.style.color = '#ef4444';
+                    message.textContent = `第 ${pageNum} 页加载失败`;
+                    spinnerEl.replaceChildren(message);
+                }
+                return false;
+            } finally {
+                pageLoads.delete(pageNum);
             }
+            })();
+            pageLoads.set(pageNum, loadPromise);
+            return loadPromise;
         };
 
         await loadSinglePage(1);
-        for (let page = 2; page <= state.totalPages; page++) {
-            loadSinglePage(page);
-        }
+        if (state.totalPages > 1) loadSinglePage(2);
+
+        const pdfContainer = document.getElementById('pdf-container');
+        const pageObserver = new IntersectionObserver((entries) => {
+            entries.forEach(async entry => {
+                if (!entry.isIntersecting) return;
+                const pageNum = Number(entry.target.id.replace('page-wrapper-', ''));
+                if (await loadSinglePage(pageNum)) pageObserver.unobserve(entry.target);
+            });
+        }, { root: pdfContainer, rootMargin: '800px 0px', threshold: 0.01 });
+        document.querySelectorAll('.pdf-page-wrapper').forEach(wrapper => {
+            if (!loadedPages.has(Number(wrapper.id.replace('page-wrapper-', '')))) {
+                pageObserver.observe(wrapper);
+            }
+        });
 
         dom.progressSlider.max = 100;
         dom.progressSlider.value = 0;
         dom.timeTotal.textContent = '--:--';
 
     } catch (error) {
-        pdfPreview.innerHTML = `<div style="color: #ef4444; margin-top: 100px;">加载失败: ${error.message}</div>`;
+        const message = document.createElement('div');
+        message.style.cssText = 'color:#ef4444; margin-top:100px;';
+        message.textContent = `加载失败: ${error.message}`;
+        pdfPreview.replaceChildren(message);
     }
 }
 

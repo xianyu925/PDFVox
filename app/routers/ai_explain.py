@@ -1,235 +1,347 @@
+import asyncio
+import base64
 import json
 import time
-import asyncio
-import pdfplumber
-from fastapi import APIRouter, HTTPException
+import uuid
+
+from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
-from app.models.schemas import ExplainRequest, StatusResponse
-from app.services.explain_service import ExplainService
-from app.services.tts_service import TTSService
+
+from app.models.db import (
+    get_task,
+    get_upload,
+    save_task,
+    update_task_status,
+)
+from app.models.schemas import StatusResponse
+from app.services.runtime import explain_service as service
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
-
-
 router = APIRouter()
-service = ExplainService()
-tts_service = TTSService()
+
+PCM_SAMPLE_RATE = 24_000
+PCM_SAMPLE_WIDTH = 2
+
+
+def _sse(payload) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _stream_headers(task_id: str | None = None) -> dict[str, str]:
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": "*",
+    }
+    if task_id:
+        headers["X-Task-Id"] = task_id
+    return headers
+
+
+def _trim_pcm_sentence(item: dict, offset_seconds: float) -> dict:
+    """Trim a cached mono 16-bit PCM sentence and rebase its word timestamps."""
+    if offset_seconds <= 0:
+        return item
+
+    raw_audio = base64.b64decode(item.get("audio", ""))
+    byte_offset = int(offset_seconds * PCM_SAMPLE_RATE) * PCM_SAMPLE_WIDTH
+    byte_offset = min(len(raw_audio), byte_offset - (byte_offset % PCM_SAMPLE_WIDTH))
+    actual_offset = byte_offset / (PCM_SAMPLE_RATE * PCM_SAMPLE_WIDTH)
+    trimmed_audio = raw_audio[byte_offset:]
+
+    timestamps = []
+    for word in item.get("word_timestamps", []):
+        start = float(word.get("start", 0))
+        end = float(word.get("end", 0))
+        if end <= actual_offset:
+            continue
+        timestamps.append(
+            {
+                **word,
+                "start": round(max(0.0, start - actual_offset), 3),
+                "end": round(max(0.0, end - actual_offset), 3),
+            }
+        )
+
+    return {
+        **item,
+        "audio": base64.b64encode(trimmed_audio).decode("utf-8"),
+        "duration": round(
+            len(trimmed_audio) / PCM_SAMPLE_WIDTH / PCM_SAMPLE_RATE, 3
+        ),
+        "word_timestamps": timestamps,
+    }
+
+
+async def _validated_upload(file_id: str, page_num: int | None = None):
+    upload = await asyncio.to_thread(get_upload, file_id)
+    if not upload or not upload.get("path"):
+        raise HTTPException(status_code=404, detail="PDF record not found")
+    total_pages = await service.resolve_total_pages(upload)
+    if page_num is not None and page_num > total_pages:
+        raise HTTPException(status_code=422, detail="page_num exceeds PDF page count")
+    return upload, total_pages
 
 
 @router.get("/playback/seek/{file_id}/page/{page_num}")
 async def playback_seek(
-    file_id: str,
-    page_num: int,
-    time_offset: float = 0.0,
-    ahead: int = 60,
+    file_id: str = Path(min_length=1, max_length=128),
+    page_num: int = Path(ge=1),
+    time_offset: float = Query(0.0, ge=0),
+    ahead: int = Query(3, ge=0, le=10),
+    course_name: str = Query("课程", min_length=1, max_length=200),
 ):
-    """用户拖动进度时：播放该页的讲解语音，支持 time_offset 秒的页内跳转。"""
+    """Replay cached/generated page audio starting at a page-local offset."""
+    _, total_pages = await _validated_upload(file_id, page_num)
 
     async def generate_stream():
         try:
-            from app.models.db import get_upload
-
-            upload = get_upload(file_id)
-            if not upload or not upload.get("path"):
-                yield f"data: {json.dumps({'type':'error','message':'无法找到 file_id 对应记录'})}\n\n"
-                return
-
-            total_pages = upload.get("total_pages", 1)
-
-            # 尝试使用已缓存的完整讲稿
-            cache_key = f"script_{file_id}_{page_num}"
-            full_script = service.summary_cache.get(cache_key)
-
+            full_script = await service.get_cached_script(
+                file_id, page_num, course_name
+            )
             if not full_script:
-                try:
-                    full_script = await service.get_full_script(file_id, page_num)
-                except Exception:
-                    full_script = "此页内容正在生成，请稍候。"
+                full_script = await service.get_full_script(
+                    file_id, page_num, course_name
+                )
 
-            play_text = full_script if full_script else "此页内容正在生成，请稍候。"
-
-            # 后台预生成后续页
             async def background_generate():
                 try:
-                    for p in range(page_num + 1, min(total_pages + 1, page_num + 1 + ahead)):
-                        await service.get_full_script(file_id, p)
-                except Exception as e:
-                    logger.error(f"后台生成异常: {e}")
+                    last_page = min(total_pages + 1, page_num + 1 + ahead)
+                    for page in range(page_num + 1, last_page):
+                        await service.get_full_script(
+                            file_id, page, course_name
+                        )
+                except Exception as exc:
+                    logger.error("Background script generation failed: %s", exc)
 
-            asyncio.create_task(background_generate())
+            if ahead:
+                asyncio.create_task(background_generate())
 
-            # 获取页内分句音频
-            sentences, from_cache = await service.get_or_generate_page_sentences(
-                play_text, file_id, page_num
+            sentences, _ = await service.get_or_generate_page_sentences(
+                full_script, file_id, page_num, course_name
             )
 
-            # time_offset: 跳过前 N 句直到累计时长 >= offset
             skipped = 0.0
-            start_idx = 0
-            if time_offset > 0:
-                for i, item in enumerate(sentences):
-                    d = item.get("duration", 0)
-                    if skipped + d >= time_offset:
-                        start_idx = i
-                        break
-                    skipped += d
+            start_idx = len(sentences)
+            first_sentence_offset = 0.0
+            for index, item in enumerate(sentences):
+                duration = max(float(item.get("duration", 0)), 0.0)
+                if skipped + duration >= time_offset:
+                    start_idx = index
+                    first_sentence_offset = max(0.0, time_offset - skipped)
+                    break
+                skipped += duration
 
-            for i in range(start_idx, len(sentences)):
-                item = sentences[i]
-                yield f"data: {json.dumps({'type': 'audio', 'data': item['audio'], 'sentence': item['sentence'], 'duration': item.get('duration', 0), 'page': page_num, 'index': i})}\n\n"
-
+            for index in range(start_idx, len(sentences)):
+                item = sentences[index]
+                if index == start_idx and first_sentence_offset > 0:
+                    item = _trim_pcm_sentence(item, first_sentence_offset)
+                if not item.get("audio") or item.get("duration", 0) <= 0:
+                    continue
+                yield _sse(
+                    {
+                        "type": "audio",
+                        "data": item["audio"],
+                        "sentence": item["sentence"],
+                        "duration": item.get("duration", 0),
+                        "word_timestamps": item.get("word_timestamps", []),
+                        "page": page_num,
+                        "index": index,
+                    }
+                )
             yield "data: [DONE]\n\n"
-
-        except Exception as e:
-            logger.error(f"playback_seek 发生异常: {e}", exc_info=True)
-            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+        except Exception as exc:
+            logger.error("playback_seek failed: %s", exc, exc_info=True)
+            yield _sse({"type": "error", "message": str(exc)})
 
     return StreamingResponse(
-        generate_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-        },
+        generate_stream(), media_type="text/event-stream", headers=_stream_headers()
     )
 
 
 @router.delete("/cancel/{file_id}")
-async def cancel_explain(file_id: str):
-    """终止指定文件的流式讲解生成（LLM + TTS 同时终止）"""
-    service.cancel_stream(file_id)
-    logger.info(f"[API] 收到取消请求，已设置 file_id={file_id} 的取消令牌")
-    return {"status": "cancelled", "file_id": file_id}
+async def cancel_explain(
+    file_id: str = Path(min_length=1, max_length=128),
+    session_id: str = Query(..., min_length=8, max_length=128),
+):
+    service.cancel_stream(file_id, session_id)
+    return {"status": "cancelled", "file_id": file_id, "session_id": session_id}
 
 
 @router.get("/status/{task_id}", response_model=StatusResponse)
-def explain_status(task_id: str):
-    from app.models.db import get_task
-
+def explain_status(task_id: str = Path(min_length=1, max_length=128)):
     task = get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return StatusResponse(
-        task_id=task_id, status=task.get("status", "unknown"), detail=task.get("detail")
+        task_id=task_id,
+        status=task.get("status", "unknown"),
+        detail=task.get("detail"),
     )
 
 
 @router.get("/stream-v3/{file_id}/page/{page_num}")
 async def explain_page_stream_v3(
-    file_id: str, page_num: int, course_name: str = "机器学习导论"
+    file_id: str = Path(min_length=1, max_length=128),
+    page_num: int = Path(ge=1),
+    course_name: str = Query("机器学习导论", min_length=1, max_length=200),
+    session_id: str = Query(..., min_length=8, max_length=128),
 ):
-    logger.info(
-        f"开始极速流式生成讲解: file_id={file_id}, page={page_num}, course={course_name}"
+    _, total_pages = await _validated_upload(file_id, page_num)
+    task_id = uuid.uuid4().hex
+    await asyncio.to_thread(
+        save_task,
+        task_id,
+        {"file_id": file_id, "page": page_num, "status": "queued", "detail": None},
     )
+    service._reset_cancel(file_id, session_id)
 
     async def generate_stream():
+        failed = False
         try:
-            if service._is_cancelled(file_id):
-                yield f"data: {json.dumps({'type': 'cancelled', 'ts': time.time()})}\n\n"
-                return
+            await asyncio.to_thread(update_task_status, task_id, "running", None)
+            yield _sse(
+                {"type": "task_start", "task_id": task_id, "page": page_num}
+            )
             async for event in service.explain_page_realtime_stream(
-                file_id=file_id, page_num=int(page_num), course_name=course_name
+                file_id=file_id,
+                page_num=page_num,
+                total_pages=total_pages,
+                course_name=course_name,
+                session_id=session_id,
             ):
-                # 统一转为 SSE 标准格式下发
-                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") == "error":
+                    failed = True
+                yield _sse(event)
 
-            # 正常结束标记
+            status = "cancelled" if service._is_cancelled(file_id, session_id) else (
+                "failed" if failed else "completed"
+            )
+            await asyncio.to_thread(update_task_status, task_id, status, None)
             yield "data: [DONE]\n\n"
-
-        except Exception as e:
-            logger.error(f"极速流式生成失败: {str(e)}", exc_info=True)
-            error_data = {
-                "type": "error",
-                "message": str(e),
-                "page": page_num,
-                "ts": time.time(),
-            }
-            yield f"data: {json.dumps(error_data)}\n\n"
+        except asyncio.CancelledError:
+            await asyncio.to_thread(
+                update_task_status, task_id, "cancelled", "Client disconnected"
+            )
+            raise
+        except Exception as exc:
+            logger.error("Page stream failed: %s", exc, exc_info=True)
+            await asyncio.to_thread(update_task_status, task_id, "failed", str(exc))
+            yield _sse(
+                {"type": "error", "message": str(exc), "page": page_num, "ts": time.time()}
+            )
+        finally:
+            service._reset_cancel(file_id, session_id)
 
     return StreamingResponse(
         generate_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 禁用 Nginx 缓存，确保流式立即推送到前端
-            "Access-Control-Allow-Origin": "*",
-        },
+        headers=_stream_headers(task_id),
     )
 
 
 @router.get("/all-stream-v3/{file_id}")
 async def explain_all_pages_stream_v3(
-    file_id: str,
-    course_name: str = "机器学习导论",
-    from_page: int = 1,
+    file_id: str = Path(min_length=1, max_length=128),
+    course_name: str = Query("机器学习导论", min_length=1, max_length=200),
+    from_page: int = Query(1, ge=1),
+    skip_sentences: int = Query(0, ge=0),
+    resume_generation: bool = Query(False),
+    session_id: str = Query(..., min_length=8, max_length=128),
 ):
-    """
-    【最新版】全书极速流式讲解生成（逐页并发摘要、推流文字和音频）
-    """
-    logger.info(
-        f"开始全书极速流式生成讲解: file_id={file_id}, course={course_name}, from_page={from_page}"
+    upload, total_pages = await _validated_upload(file_id)
+    if from_page > total_pages:
+        raise HTTPException(status_code=422, detail="from_page exceeds PDF page count")
+
+    task_id = uuid.uuid4().hex
+    await asyncio.to_thread(
+        save_task,
+        task_id,
+        {"file_id": file_id, "page": from_page, "status": "queued", "detail": None},
     )
+    service._reset_cancel(file_id, session_id)
 
     async def generate_stream():
         try:
-            from app.models.db import get_upload
-
-            upload = get_upload(file_id)
-            if not upload or not upload.get("path"):
-                raise ValueError(f"无法找到文件记录或路径: {file_id}")
-
-            pdf_path = upload.get("path")
-            with pdfplumber.open(pdf_path) as pdf:
-                total_pages = len(pdf.pages)
-
-            service._reset_cancel(file_id)
-
-            yield f"data: {json.dumps({'type': 'global_start', 'total_pages': total_pages, 'ts': time.time()})}\n\n"
+            await asyncio.to_thread(update_task_status, task_id, "running", None)
+            yield _sse(
+                {
+                    "type": "global_start",
+                    "task_id": task_id,
+                    "total_pages": total_pages,
+                    "ts": time.time(),
+                }
+            )
 
             for page_num in range(from_page, total_pages + 1):
-                if service._is_cancelled(file_id):
-                    logger.info(f"[全书流] 检测到取消令牌，终止于第{page_num}页")
-                    yield f"data: {json.dumps({'type': 'cancelled', 'ts': time.time()})}\n\n"
-                    break
+                if service._is_cancelled(file_id, session_id):
+                    await asyncio.to_thread(
+                        update_task_status, task_id, "cancelled", None
+                    )
+                    yield _sse({"type": "cancelled", "ts": time.time()})
+                    return
 
-                yield f"data: {json.dumps({'type': 'page_start', 'page': page_num, 'ts': time.time()})}\n\n"
-
-                # 当前页推流的同时，后台预热下一页所需的相邻摘要
+                yield _sse({"type": "page_start", "page": page_num, "ts": time.time()})
                 prefetch_page = page_num + 2
                 if prefetch_page <= total_pages:
                     asyncio.create_task(
                         service.prefetch_summary(
-                            file_id, prefetch_page, pdf_path, course_name
+                            file_id,
+                            prefetch_page,
+                            upload["path"],
+                            course_name,
                         )
                     )
 
                 async for event in service.explain_page_realtime_stream(
-                    file_id, page_num, total_pages, course_name
+                    file_id,
+                    page_num,
+                    total_pages,
+                    course_name,
+                    session_id,
+                    skip_sentences=skip_sentences if page_num == from_page else 0,
+                    force_regenerate=resume_generation and page_num == from_page,
                 ):
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield _sse(event)
+                    if event.get("type") == "error":
+                        await asyncio.to_thread(
+                            update_task_status,
+                            task_id,
+                            "failed",
+                            event.get("message"),
+                        )
+                        yield "data: [DONE]\n\n"
+                        return
 
-                yield f"data: {json.dumps({'type': 'page_complete', 'page': page_num, 'total_pages': total_pages, 'ts': time.time()})}\n\n"
+                yield _sse(
+                    {
+                        "type": "page_complete",
+                        "page": page_num,
+                        "total_pages": total_pages,
+                        "ts": time.time(),
+                    }
+                )
 
-            # 发送全局结束标记
-            yield f"data: {json.dumps({'type': 'global_end', 'ts': time.time()})}\n\n"
+            await asyncio.to_thread(update_task_status, task_id, "completed", None)
+            yield _sse({"type": "global_end", "task_id": task_id, "ts": time.time()})
             yield "data: [DONE]\n\n"
-
-        except Exception as e:
-            logger.error(f"全书流式生成失败: {str(e)}", exc_info=True)
-            error_data = {"type": "error", "message": str(e), "ts": time.time()}
-            yield f"data: {json.dumps(error_data)}\n\n"
+        except asyncio.CancelledError:
+            await asyncio.to_thread(
+                update_task_status, task_id, "cancelled", "Client disconnected"
+            )
+            raise
+        except Exception as exc:
+            logger.error("All-pages stream failed: %s", exc, exc_info=True)
+            await asyncio.to_thread(update_task_status, task_id, "failed", str(exc))
+            yield _sse({"type": "error", "message": str(exc), "ts": time.time()})
+            yield "data: [DONE]\n\n"
+        finally:
+            service._reset_cancel(file_id, session_id)
 
     return StreamingResponse(
         generate_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-        },
+        headers=_stream_headers(task_id),
     )
