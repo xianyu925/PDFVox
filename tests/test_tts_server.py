@@ -8,6 +8,8 @@ class StandaloneTTSServerTests(unittest.IsolatedAsyncioTestCase):
         health = await tts_server.health_check()
 
         self.assertEqual("ok", health["status"])
+        self.assertEqual("1.0.0", health["version"])
+        self.assertEqual("1.0.0", tts_server.app.version)
         self.assertTrue(hasattr(tts_server.tts_service, "synthesize_to_wav"))
 
 

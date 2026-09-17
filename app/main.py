@@ -3,10 +3,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import settings
+from app.version import __version__
 
 from app.routers import upload, pdf_view, ai_explain, qa
 
-app = FastAPI(title="PDFVox Web")
+app = FastAPI(title="PDFVox Web", version=__version__)
 
 app.include_router(upload.router, prefix="/upload", tags=["upload"])
 app.include_router(pdf_view.router, prefix="/pdf", tags=["pdf"])
@@ -37,4 +38,8 @@ def status(request: Request):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "message": "PDFVox web server is running"}
+    return {
+        "status": "ok",
+        "message": "PDFVox web server is running",
+        "version": __version__,
+    }

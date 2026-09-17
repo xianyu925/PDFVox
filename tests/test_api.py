@@ -15,6 +15,8 @@ class APITests(unittest.TestCase):
     def test_health(self):
         response = self.client.get("/api/health")
         self.assertEqual(200, response.status_code)
+        self.assertEqual("1.0.0", response.json()["version"])
+        self.assertEqual("1.0.0", app.version)
 
     def test_viewer_exposes_all_playback_rates(self):
         response = self.client.get("/viewer.html")

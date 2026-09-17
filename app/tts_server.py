@@ -10,12 +10,13 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.services.tts_service import TTSService
+from app.version import __version__
 
 
 OUTPUT_DIR = Path(settings.STORAGE_PATH) / "tts_output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="PDFVox TTS Server", version="1.0.0")
+app = FastAPI(title="PDFVox TTS Server", version=__version__)
 tts_service = TTSService()
 
 
@@ -44,7 +45,7 @@ class TTSBatchResponse(BaseModel):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "PDFVox TTS Server", "version": "1.0.0"}
+    return {"status": "ok", "service": "PDFVox TTS Server", "version": __version__}
 
 
 async def _synthesize(text: str, prefix: str) -> str:

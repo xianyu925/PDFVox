@@ -1,649 +1,381 @@
-# PDFVox — AI Coding Assistant Reference
+# PDFVox v1.0.0 — AI 编程助手项目指南
 
-> **Target audience**: AI coding assistants (Claude, Cursor, Copilot). Precision over prose.
-> **Project**: FastAPI web app that converts PDF/PPT slides into AI-narrated speech with synchronized subtitles, using Volcengine (火山引擎) LLM + TTS APIs.
+> 本文面向维护 PDFVox 的开发者与 AI 编程助手。内容以 `v1.0.0` 当前代码为准，描述真实功能、架构边界、关键状态和修改约束。
 
----
+## 1. 项目定位与版本状态
 
-## 1. File Map & Role
+PDFVox 是一个 FastAPI Web 应用，将 PDF 课件逐页转换为 AI 教授风格的流式语音讲解，并在浏览器中同步展示页面、完整句子字幕和字级朗读高亮。
 
-```
-run.py                                  # Entry: uvicorn.run("app.main:app")
-app/config.py                           # Settings (reads os.environ, optional .env via python-dotenv)
-app/main.py                             # FastAPI app factory, route registration, static/template mounts
-app/models/db.py                        # SQLite CRUD (uploads + tasks tables), init_db() on import
-app/models/schemas.py                   # Pydantic request/response models
-app/routers/upload.py                   # POST /upload/ — PDF upload
-app/routers/pdf_view.py                 # GET /pdf/{id} — page listing, page image/text
-app/routers/ai_explain.py              # GET /explain/* — SSE streaming explanation, seek, cancel
-app/routers/qa.py                       # POST /qa/ask/stream — SSE streaming Q&A with ASR
-app/services/explain_service.py         # ExplainService — orchestration: summary cache, LLM+TTS dual-stream
-app/services/qa_service.py              # QAService — multi-turn Q&A, prompt building, LLM+TTS stream
-app/services/llm_service.py             # LLMService — sync (responses.create) + async streaming (chat.completions)
-app/services/tts_service.py             # TTSService — Volcengine WebSocket TTS, per-sentence sessions
-app/services/asr_service.py             # ASRService — faster-whisper + Silero VAD speech-to-text
-app/services/pdf_service.py             # PDFService — pdfplumber text extraction + 150 DPI image rendering
-app/services/protocols.py               # Volcengine TTS binary WebSocket protocol (Message, encode/decode)
-app/utils/logging.py                    # get_logger(name) factory, file+console handlers
-web/index.html                          # Upload page (drag/drop, POST /upload/)
-web/viewer.html                         # Main playback page (left panel + PDF + subtitle overlay)
-web/status.html                         # Task status query page
-web/static/viewer-state.js              # Shared state object + getQueryParam() (ES module)
-web/static/viewer.js                    # Entry: DOM init, loadEntirePDF(), fullscreen, wires controls
-web/static/viewer-audio.js              # Web Audio engine: queue, DVR seek, word-level highlighting
-web/static/viewer-stream.js             # SSE stream handler: state machine, recording, Q&A pipeline
-requirements.txt                        # Python dependencies
-.env / .env.example                     # Environment variables
+- 当前正式版本：`v1.0.0`
+- Python 版本号来源：`app/version.py`
+- 主应用入口：`python run.py`
+- 默认地址：`http://localhost:8000`
+- 独立 TTS 服务：`python -m app.tts_server`，默认监听 `8001`
+- 当前上传接口只接受 `.pdf`。PPT/PPTX 需要先导出为 PDF。
+
+核心数据流：
+
+```text
+上传 PDF
+  → pdfplumber 渲染页面图像
+  → 火山引擎豆包多模态 LLM 生成讲稿
+  → 火山引擎双向 WebSocket TTS 逐句合成 24 kHz PCM
+  → SSE 推送到浏览器
+  → Web Audio API 播放并同步字幕、进度和页面
 ```
 
----
+## 2. v1.0.0 功能范围
 
-## 2. Module Dependency Graph
+### 2.1 文档与讲解
 
-```
-                            run.py
-                               │
-                        app/main.py
-                         /    │    \         \
-        app/config.py   app/models/db.py   app/routers/*   app/utils/logging.py
-                                               │
-                                     app/services/explain_service.py ──→ llm_service, tts_service, pdf_service, db
-                                     app/services/qa_service.py      ──→ llm_service, tts_service, explain_service, db
-                                     app/services/llm_service.py     ──→ config (LLM_API_KEY)
-                                     app/services/tts_service.py     ──→ config (TTS_API_KEY, RESOURCE_ID, VOICE) + protocols
-                                     app/services/asr_service.py    ──→ (standalone, no internal deps)
-                                     app/services/pdf_service.py    ──→ config (STORAGE_PATH)
-                                     app/services/protocols.py      ──→ (standalone, pure protocol impl)
+- 上传、校验并持久化 PDF；默认大小上限为 50 MB。
+- 懒加载并渲染所有 PDF 页面，支持滚动页码识别和沉浸式全屏单页展示。
+- 支持全书或单页流式讲解，LLM 输出和 TTS 输入并发执行。
+- 讲解时使用相邻页摘要补充上下文，并提前预取后续页面摘要。
+- 每句音频携带页面、句子、时长、句序号和字级时间戳。
+- 生成任务记录到 SQLite，可通过任务 ID 查询状态。
+- 取消按 `file_id + session_id` 隔离，不会误停其他浏览器会话。
 
-web/static/viewer.js         imports viewer-state.js, viewer-audio.js, viewer-stream.js
-web/static/viewer-audio.js   imports viewer-state.js
-web/static/viewer-stream.js  imports viewer-state.js, viewer-audio.js
-```
+### 2.2 播放器与时间轴
 
-### Router → Service instantiation (module-level singletons)
+- 浏览器仅把已经收到的 PCM 音频计入总时长；未生成的未来音频不会扩展进度条。
+- 总时长由 PCM 字节数计算，服务端提供的 `duration` 仅作为无音频数据时的后备值。
+- 拖动进度条是浏览器本地 DVR 回放，不会因拖动触发尚未生成的音频。
+- 左方向键回退 5 秒，不足 5 秒时回到开头。
+- 右方向键快进 5 秒，不足 5 秒时跳到当前已生成音频结尾。
+- 支持 `0.5x`、`0.75x`、`1x`、`1.25x`、`1.5x`、`2x`。
+- `Shift + ←` 与 `Shift + →` 分别降低和提高一档倍速。
+- 在输入框、文本域或可编辑区域中按方向键不会触发播放器快捷键。
+- 双击已有音频的 PDF 页面会跳到该页音频起点；尚未生成时提示“音频还在生成中...”。
 
-| Router file | Instantiates |
+### 2.3 续接生成与字幕
+
+- 终止生成只关闭当前 SSE 并发送取消请求，已经收到的音频、时间轴和播放队列不会清空。
+- 继续生成从 `resumePage` 开始；若当前页只生成了一部分，则通过 `skip_sentences` 跳过已有句子。
+- 音频使用 `page:index` 去重，避免恢复生成时重复追加已存在的句子。
+- seek 后字幕仍展示完整句子，而不是只展示剩余片段。
+- 字幕按 TTS 时间戳定位当前字；一个时间戳包含多个字符时会均分为逐字区间。
+
+### 2.4 语音问答
+
+- 支持文本问题或浏览器录音问题。
+- 浏览器录音重采样为 16 kHz 单声道 WAV；服务端使用本地 faster-whisper 转写。
+- Silero VAD 可选，加载失败时退化到 RMS 能量检测。
+- 问答会使用当前页图像、从第 1 页到当前页的已缓存讲稿和当前会话历史。
+- 每个 `file_id + session_id` 最多保留最近 5 轮问答。
+- LLM 回答文本和 TTS 回答音频通过 SSE 流式返回。
+
+### 2.5 独立 TTS HTTP 服务
+
+`app/tts_server.py` 是可运行的辅助服务，不属于主应用路由：
+
+- `GET /health`：健康状态和版本。
+- `GET /status`：运行状态和输出目录。
+- `POST /tts`：将单段文本合成为 WAV。
+- `POST /tts/batch`：顺序处理最多 100 段文本，允许部分成功。
+
+## 3. 技术与 API 选型
+
+| 能力 | 当前实现 |
 |---|---|
-| `ai_explain.py` | `ExplainService()`, `TTSService()` |
-| `qa.py` | `ASRService()`, `ExplainService()`, `LLMService()`, `TTSService()`, `QAService(llm, tts, explain)` |
+| Web 框架 | FastAPI + uvicorn |
+| LLM | OpenAI Python SDK，连接火山引擎 Ark 的 OpenAI 兼容地址 |
+| LLM 同步调用 | `OpenAI.responses.create`，用于摘要和完整讲稿 |
+| LLM 流式调用 | `AsyncOpenAI.chat.completions.create(stream=True)` |
+| TTS | `websockets` 直接连接火山引擎双向 WebSocket 接口 |
+| TTS 协议 | 项目内 `protocols.py` 实现的自定义二进制协议 |
+| TTS 音频 | 24 kHz、16-bit、单声道 PCM，开启字幕时间戳 |
+| ASR | faster-whisper base，CPU int8；Silero VAD 可选 |
+| PDF | pdfplumber，页面以 150 DPI PNG 渲染 |
+| 前端 | 原生 ES Module、Web Audio API、EventSource、MediaRecorder |
+| 数据 | SQLite + 文件系统 + 浏览器内存状态 |
 
-**Note**: `ai_explain.py` and `qa.py` each create their own `ExplainService()` and `TTSService()` instances — they are **not** shared singletons. Each router has independent in-memory caches.
+注意：LLM 使用 OpenAI SDK 只是客户端协议选择，实际请求发送到 `LLM_BASE_URL` 指定的火山引擎 Ark；TTS 不使用 OpenAI SDK，也不是普通 REST 调用。
 
----
+## 4. 目录与职责
 
-## 3. Startup Sequence
-
-```
-1. python run.py
-2. uvicorn imports app.main:app
-3. app/main.py executes at module level:
-   a. from app.models.db import init_db → triggers init_db() on import (creates tables)
-   b. init_db() called again explicitly
-   c. Imports 4 router modules (upload, pdf_view, ai_explain, qa)
-   d. Registers routers with prefixes: /upload, /pdf, /explain, /qa
-   e. Creates output/ and STORAGE_PATH directories
-   f. Mounts /static → web/static/
-   g. Defines Jinja2Templates for /, /viewer.html, /status.html
-   h. Defines /api/health
-4. uvicorn starts listening on HOST:PORT
-```
-
----
-
-## 4. Configuration Matrix
-
-All from `app/config.py` → `settings` singleton. Source: `os.environ` + optional `.env` (python-dotenv).
-
-| Variable | Type | Default | Consumed by | Effect |
-|---|---|---|---|---|
-| `LLM_API_KEY` | str | `""` | `LLMService.__init__()` | Volcengine Ark API key for both sync+async clients |
-| `TTS_API_KEY` | str | `""` | `TTSService.__init__()` | New-console WebSocket auth header `X-Api-Key` |
-| `TTS_API_RESOURCE_ID` | str | `seed-tts-2.0` | `TTSService.__init__()` | TTS model/resource selection header |
-| `TTS_VOICE` | str | `""` | `TTSService.__init__()` | TTS speaker ID (e.g. `zh_female_yingyujiaoxue_uranus_bigtts`) |
-| `STORAGE_PATH` | str | `<project>/output` | `PDFService._resolve_path()`, `upload.py` | PDF upload directory |
-| `ALLOWED_EXTENSIONS` | tuple | `(".pdf",)` | `upload.py` | File type whitelist |
-| `MODEL_ENDPOINT` | str | `""` | (unused in current code) | Reserved |
-| `HOST` | str | `0.0.0.0` | `run.py` | uvicorn bind address |
-| `PORT` | int | `8000` | `run.py` | uvicorn port |
-| `AUTO_RELOAD` | bool | `False` | `run.py` | uvicorn hot reload |
-| `LOG_LEVEL` | str | `INFO` | `app/utils/logging.py` | Root logger level |
-| `LOG_TO_CONSOLE` | bool | `True` | `app/utils/logging.py` | Enable StreamHandler |
-
----
-
-## 5. API Endpoints
-
-### 5.1 Upload
-
-**`POST /upload/`**
-- Input: `multipart/form-data` with `file` field (PDF)
-- Output: `{file_id, filename, url}`
-- Side effects: writes PDF to `STORAGE_PATH/{uuid}.pdf`, inserts into SQLite `uploads`
-- Error: 400 on non-PDF extension
-
-### 5.2 PDF View
-
-**`GET /pdf/{file_id}`**
-- Output: `{file_id, filename, pages: [1, 2, ..., N]}`
-- Calls: `PDFService.list_pages()`
-
-**`GET /pdf/{file_id}/page/{page}`**
-- Output: `{page, text, image_url}` (image_url is `data:image/png;base64,...`)
-- Calls: `PDFService.get_page_text()` + `PDFService.get_page_image()` (150 DPI PNG)
-
-### 5.3 Explanation (SSE)
-
-All return `text/event-stream` with headers: `Cache-Control: no-cache`, `Connection: keep-alive`, `X-Accel-Buffering: no`, CORS `*`.
-
-**`GET /explain/all-stream-v3/{file_id}?course_name=&from_page=`**
-- Full-book streaming. Iterates pages sequentially, yields SSE events per page.
-- Calls: `ExplainService.explain_page_realtime_stream()` per page
-- Prefetch: `asyncio.create_task(service.prefetch_summary())` for page+2
-
-**`GET /explain/stream-v3/{file_id}/page/{page_num}?course_name=`**
-- Single-page streaming. Same core pipeline as all-stream-v3 but one page only.
-
-**`GET /explain/playback/seek/{file_id}/page/{page_num}?time_offset=&ahead=`**
-- DVR seek: looks up cached full script. If missing, calls `get_full_script()`.
-- Calls: `get_or_generate_page_sentences()` → skips sentences up to `time_offset` → yields cached audio SSE events
-- Background: `asyncio.create_task(get_full_script())` for next `ahead` pages
-
-**`DELETE /explain/cancel/{file_id}`**
-- Sets `_cancel_tokens[file_id] = True` on the router's ExplainService instance
-
-**`GET /explain/status/{task_id}`**
-- Queries SQLite `tasks` table, returns `{task_id, status, detail}`
-
-### 5.4 Q&A (SSE)
-
-**`POST /qa/ask/stream`**
-- Input: `multipart/form-data` — `file` (audio/wav, optional), `question` (text, optional), `file_id`, `page_num`
-- Flow: if audio → `ASRService.transcribe_pcm_to_text()` → text; background `asyncio.create_task(get_full_script())`; then `QAService.stream_qa_response()`
-- Returns: SSE stream with `audio`, `text`, `error` events, terminated by `[DONE]`
-
-### 5.5 Pages & Health
-
-**`GET /`** → index.html (Jinja2)
-**`GET /viewer.html`** → viewer.html (Jinja2)
-**`GET /status.html`** → status.html (Jinja2)
-**`GET /api/health`** → `{status: "ok"}`
-
----
-
-## 6. Data Flow Diagrams
-
-### 6.1 Full-Book Streaming (`/explain/all-stream-v3`)
-
-```
-Browser clicks "一键生成"
-  → EventSource connects to /explain/all-stream-v3/{file_id}?course_name=X
-
-Server-side (per page P):
-  1. pdfplumber: render page P → 150 DPI PNG → base64
-  2. asyncio.gather(prev_summary, next_summary) with 3s timeout
-     → if cached: instant; else: LLMService.generate_explanation() (sync, doubao-seed-2-0-pro)
-  3. LLMService.stream_explanation() (async, doubao-seed-1-8-251228, chat.completions.create)
-     → yields {"type":"text","data":"..."} chunks → text_queue (asyncio.Queue)
-  4. Concurrent TTS task reads text_queue:
-     → text_splitter: accumulates text, splits by delimiters (。！？，；\n!?,;) + 60-char max
-     → per sentence: _synthesize_sentence() → WebSocket session → PCM + word_boundary
-     → yields {"type":"audio","data":"<base64>","sentence":"...","duration":N,"word_timestamps":[...]}
-     → out_queue (asyncio.Queue)
-  5. Main loop reads out_queue → yields to SSE response
-  6. Background: prefetch summary for page P+2 (asyncio.create_task)
-
-SSE events sent:
-  global_start → for each page: page_start → audio*N → page_complete → global_end → [DONE]
+```text
+PDFVox/
+├── run.py                         # 主 Web 服务启动入口
+├── app/
+│   ├── version.py                 # 唯一版本号来源
+│   ├── config.py                  # 环境变量和项目路径
+│   ├── main.py                    # 主 FastAPI 应用、页面和路由注册
+│   ├── tts_server.py              # 可独立启动的 TTS HTTP 服务
+│   ├── models/
+│   │   ├── db.py                  # SQLite 表、上传/任务/持久缓存操作
+│   │   └── schemas.py             # Pydantic 响应模型
+│   ├── routers/
+│   │   ├── upload.py              # PDF 上传与校验
+│   │   ├── pdf_view.py            # PDF 信息、文本和页面图像
+│   │   ├── ai_explain.py          # 讲解 SSE、回放、取消、状态
+│   │   └── qa.py                  # 文本/语音问答 SSE
+│   ├── services/
+│   │   ├── runtime.py             # 路由共享的进程级服务实例
+│   │   ├── cache.py               # 线程安全 TTL/LRU 内存缓存
+│   │   ├── explain_service.py     # 讲解编排、缓存、取消与恢复
+│   │   ├── explain_audio.py       # 页面音频生成、完整性检查与缓存
+│   │   ├── explain_prompts.py     # 摘要、实时讲解、完整讲稿提示词
+│   │   ├── llm_service.py         # 火山 Ark/OpenAI 兼容 LLM 客户端
+│   │   ├── tts_service.py         # 双向 WebSocket TTS 与 WAV 导出
+│   │   ├── protocols.py           # TTS 二进制消息编解码
+│   │   ├── asr_service.py         # 延迟加载的本地 ASR/VAD
+│   │   ├── qa_service.py          # 多轮问答上下文和 LLM/TTS 编排
+│   │   └── pdf_service.py         # PDF 读取、渲染与文件级锁
+│   └── utils/logging.py           # 文件/控制台日志
+├── web/
+│   ├── index.html                 # 上传页
+│   ├── viewer.html                # 阅读、讲解和问答页
+│   ├── status.html                # 任务状态页
+│   └── static/
+│       ├── viewer.js              # 页面初始化、PDF 懒加载、双击与全屏
+│       ├── viewer-state.js        # 共享状态和 DOM 引用
+│       ├── viewer-stream.js       # SSE、生成按钮状态机、录音问答
+│       ├── viewer-audio.js        # Web Audio 队列、seek、倍速和快捷键
+│       ├── viewer-timeline.js     # PCM 时长、格式化和页面起点查询
+│       ├── viewer-subtitles.js    # 完整句子渲染和字级高亮
+│       └── viewer-pages.js        # 页面切换与页码同步
+├── tests/                         # 自动化测试
+├── requirements.txt              # 运行依赖
+├── requirements-dev.txt          # 测试依赖
+├── pytest.ini                    # 仅收集 tests/
+└── .env.example                  # 配置模板
 ```
 
-### 6.2 DVR Seek (`/explain/playback/seek`)
+`doc/`、`.pytest_cache/`、`.env`、运行数据库和用户上传内容不应提交到 Git。
 
-```
-User drags progress slider → binary search sentenceStartTimes[]
-  → fetch /explain/playback/seek/{file_id}/page/{P}?time_offset=X
-  → Server: get_or_generate_page_sentences(full_script, file_id, page)
-    → if page_audio_cache hit: return cached sentences
-    → else: TTSService.stream_tts_input() for entire page text, cache and return
-  → skip sentences until cumulative duration ≥ time_offset
-  → SSE stream: audio*N → [DONE]
-  → Frontend: rebuilds audio queue, resumes playback
-```
+## 5. 运行时架构
 
-### 6.3 Q&A (`/qa/ask/stream`)
+### 5.1 共享服务
 
-```
-User clicks "Ask" → mic opens → MediaRecorder records
-  → silence detection (RMS < 0.02 for 800ms) → auto-stop
-  → _convertBlobTo16kWav() → WAV blob
-  → POST /qa/ask/stream (multipart: file=WAV, file_id, page_num)
+`app/services/runtime.py` 创建一个进程级 `ExplainService`，并把其中的 LLM/TTS 实例传给 `QAService`。讲解和问答因此共享：
 
-Server:
-  1. _extract_pcm() from WAV → ASRService.transcribe_pcm_to_text() → text
-  2. asyncio.create_task(explain_service.get_full_script(file_id, page_num))  # fire-and-forget
-  3. QAService.stream_qa_response():
-     a. get_upload(file_id) → get page image (pdfplumber)
-     b. _build_prompt(): checks summary_cache[f"script_{file_id}_{page_num}"]
-        → if cached: _QA_SYSTEM_WITH_SCRIPT (script + history + image)
-        → if not: _QA_SYSTEM_WITHOUT_SCRIPT (history + image)
-     c. LLMService.stream_explanation() → text chunks
-     d. TTSService.stream_tts_input() → audio chunks (concurrent with LLM via asyncio.Queue)
-     e. add_history(file_id, question, answer) — caps at 5 rounds
-  4. SSE events: text*, audio*, [DONE]
+- 摘要、完整讲稿和页面音频缓存；
+- LLM/TTS 配置；
+- 对同一 PDF 的上下文视图。
 
-Frontend:
-  → Plays answer audio with subtitle
-  → Shows "Resume" / "Close" floating panel
+不要在路由模块中重新实例化 `ExplainService`，否则取消令牌和缓存会分裂。
+
+### 5.2 讲解双流
+
+每页讲解包含两个异步任务：
+
+```text
+LLM task ──文本片段──> text_queue ──> TTS task ──音频事件──> out_queue ──> SSE
 ```
 
----
+- LLM 生成文本时，TTS 已预连接 WebSocket。
+- TTS 根据 `。！？，；\n!?,;` 分句，超过 60 字时强制切分。
+- `<END>` 表示 LLM 文本结束，`<DONE>` 表示 TTS 输出结束。
+- 任一服务错误都转换为 `error` 事件，不应缓存不完整页面。
+- 客户端断开或主动取消时，后台任务应被取消并清理。
 
-## 7. In-Memory State
+### 5.3 缓存层
 
-All caches are dict-based, per-instance, no TTL, no eviction. Lost on process restart.
+缓存分为两层：
 
-### ExplainService
+1. `TTLCache`：进程内、线程安全、TTL + LRU，用于低延迟读取。
+2. SQLite `generated_cache`：JSON 持久缓存，带到期时间和最大条目数。
 
-| Cache | Key | Value | Populated by | Read by |
-|---|---|---|---|---|
-| `summary_cache[file_id]` | `page_num` (int) | page summary string (≤100 chars) | `_ensure_single_summary()` → LLM sync | `_get_context_summaries()` |
-| `summary_cache[file_id]` | `f"script_{file_id}_{page_num}"` | full script string | `get_full_script()` → LLM sync | `playback_seek()`, `_build_prompt()` (QA) |
-| `page_audio_cache[file_id]` | `page_num` (int) | `list[dict]` where dict = `{sentence, audio, duration, word_timestamps}` | `get_or_generate_page_sentences()`, `stream_page_sentences()` | `playback_seek()`, `stream_page_sentences()` |
-| `_cancel_tokens` | `file_id` (str) | `bool` | `cancel_stream()` | `_is_cancelled()` in LLM/TTS/main loops |
+缓存内容包括：
 
-### QAService
+- 页面摘要 `summary`；
+- 完整讲稿 `script`；
+- 完整页面音频 `audio`；
+- 会话问答历史 `qa_history`。
 
-| Cache | Key | Value | Max size |
-|---|---|---|---|
-| `_history[file_id]` | (implicit list) | `list[dict]` where dict = `{question, answer}` | 5 rounds (FIFO, oldest evicted) |
+讲解缓存键包含内容类型、文件 ID、页码、课程名和 LLM 模型；音频键还包含 TTS 音色与资源 ID。修改模型、音色或课程名不会错误复用旧内容。
 
----
+### 5.4 数据库
 
-## 8. Constants & Magic Values
+SQLite 位于 `${STORAGE_PATH}/pdfvox.db`，导入 `app.models.db` 时自动初始化：
 
-### LLM Service (`app/services/llm_service.py`)
-
-| Value | Location | Purpose |
-|---|---|---|
-| `https://ark.cn-beijing.volces.com/api/v3` | line 14, 19 | Volcengine API base URL |
-| `doubao-seed-2-0-pro-260215` | line 73 | Model for sync non-streaming calls (summaries, full scripts) |
-| `doubao-seed-1-8-251228` | line 155 | Model for async streaming calls (realtime explanation) |
-| `max_tokens=800` | line 24 | Default max_tokens for `generate_explanation()` |
-| `max_tokens=800` | line 98 | Default max_tokens for `stream_explanation()` |
-| `max_tokens=200` | explain_service.py line 80 | Override for page summaries |
-
-### TTS Service (`app/services/tts_service.py`)
-
-| Value | Location | Purpose |
-|---|---|---|
-| `wss://openspeech.bytedance.com/api/v3/tts/bidirection` | line 39 | TTS WebSocket endpoint |
-| `X-Api-Resource-Id: seed-tts-2.0` | line 63 | TTS resource ID header |
-| `24kHz, 16-bit, mono, PCM` | line 193-197 | Audio format in `base_request` |
-| `ssl.CERT_NONE` | line 68 | SSL verification disabled |
-| TTS sentence delimiters: `。！？，；\n!?,;` | line 206 | Text splitter characters |
-| `max sentence length: 60 chars` | line 221 | Force flush threshold |
-| `open_timeout=30, ping_interval=15, ping_timeout=15` | line 74-76 | WebSocket connect params |
-| `family=socket.AF_INET` | line 78 | Force IPv4 |
-
-### Explain Service (`app/services/explain_service.py`)
-
-| Value | Location | Purpose |
-|---|---|---|
-| `timeout=3.0` (seconds) | line 144 | Adjacent page summary timeout |
-| `timeout=120.0` (seconds) | line 224, 261 | Queue read timeouts (LLM→TTS text, main loop) |
-| `asyncio.sleep(0.1)` | line 251 | Delay between launching LLM and TTS tasks (ensures text_queue has consumer) |
-| `ahead=60` (pages) | `playback_seek()` param | DVR background prefetch range |
-
-### ASR Service (`app/services/asr_service.py`)
-
-| Value | Location | Purpose |
-|---|---|---|
-| `faster_whisper.WhisperModel("base", device="cpu", compute_type="int8")` | line 37 | Whisper model config |
-| `language="zh", beam_size=5` | line 127 | Whisper transcribe params |
-| `DEFAULT_SAMPLE_RATE = 16000` | line 17 | Audio sample rate |
-| `RMS threshold > 100` | line 109 | Fallback speech detection (when VAD unavailable) |
-
-### QA Service (`app/services/qa_service.py`)
-
-| Value | Location | Purpose |
-|---|---|---|
-| Max history rounds: `5` | line 54 | Conversation history cap |
-| `asyncio.sleep(0.05)` | line 200 | LLM→TTS launch gap |
-
-### PDF Service (`app/services/pdf_service.py`)
-
-| Value | Location | Purpose |
-|---|---|---|
-| `resolution=150` (DPI) | line 53 | Page image render resolution |
-
-### Frontend (`web/static/viewer-stream.js`)
-
-| Value | Location | Purpose |
-|---|---|---|
-| Silence threshold: `RMS < 0.02` for `800ms` | setupAskButton() | Auto-stop recording |
-| Audio resample: `16000 Hz` | _convertBlobTo16kWav() | WAV output for ASR |
-| Progress update interval: `100ms` | viewer-audio.js | updateProgressUI() setInterval |
-
----
-
-## 9. SSE Event Protocol (Complete Catalog)
-
-### Events sent by server → client
-
-| `type` | Direction | Fields | When |
-|---|---|---|---|
-| `global_start` | S→C | `total_pages, ts` | Start of all-stream-v3 |
-| `page_start` | S→C | `page, ts` | Before each page's LLM+TTS pipeline |
-| `start` | S→C | `page, ts` | explain_page_realtime_stream start |
-| `text` | S→C | `data, page, ts` | Each LLM text chunk (streaming) |
-| `audio` | S→C | `data` (base64 PCM), `page`, `sentence`, `duration`, `word_timestamps[{char,start,end}]` | Each synthesized sentence |
-| `end` | S→C | `page, page_duration?, ts` | Page pipeline completed |
-| `page_complete` | S→C | `page, total_pages, ts` | End of one page in all-stream |
-| `global_end` | S→C | `ts` | End of all-stream-v3 |
-| `error` | S→C | `message, page?, ts` | Any error in pipeline |
-| `cancelled` | S→C | `ts` | Stream cancelled by user |
-| `[DONE]` | S→C | (literal string `data: [DONE]\n\n`) | SSE stream terminator |
-
-### Events used internally (LLMService → caller)
-
-| `type` | Fields | Purpose |
-|---|---|---|
-| `start` | `data: {page, stage:"llm"}`, `page`, `ts` | LLM stream starting |
-| `text` | `data: "<chunk>"`, `page`, `ts` | LLM text chunk |
-| `end` | `data: {page, stage:"llm", length}`, `page`, `ts` | LLM stream finished |
-| `error` | `data: {error, stage:"llm"}`, `page`, `ts` | LLM stream error |
-
-### Events used internally (TTSService → caller)
-
-| `type` | Fields | Purpose |
-|---|---|---|
-| `audio` | `data` (base64 PCM), `page`, `sentence`, `duration`, `word_timestamps`, `ts` | Synthesized sentence audio |
-| `error` | `message` | TTS synthesis error |
-
----
-
-## 10. External API Reference
-
-### 10.1 Volcengine LLM (doubao)
-
-**Sync path** — `LLMService.generate_explanation()`:
-- Client: `openai.OpenAI`
-- Endpoint: `https://ark.cn-beijing.volces.com/api/v3`
-- Method: `client.responses.create(model="doubao-seed-2-0-mini-260428", input=[...])`
-- Auth: `api_key=settings.LLM_API_KEY`
-- Input format: `[{role:"system"/"user", content:[{type:"input_text"/"input_image", ...}]}]`
-- Output: `response.output[1].content[].text`
-- Used for: page summaries, full scripts (non-streaming, quality-first)
-
-**Async streaming path** — `LLMService.stream_explanation()`:
-- Client: `openai.AsyncOpenAI`
-- Endpoint: `https://ark.cn-beijing.volces.com/api/v3`
-- Method: `async_client.chat.completions.create(model="doubao-seed-2-0-mini-260428", messages=[...], stream=True)`
-- Auth: `api_key=settings.LLM_API_KEY`
-- Input format: OpenAI standard `[{role, content}]` (not Volcengine-specific)
-- Output: `async for chunk in response` → `chunk.choices[0].delta.content`
-- Used for: realtime streaming explanation, Q&A answers (speed-first)
-
-**Prompt format conversion** (sync path only): `type:"text"` → `type:"input_text"`, `type:"image_url"` → `type:"input_image"`. The async path uses standard OpenAI format.
-
-### 10.2 Volcengine TTS (Bidirectional WebSocket)
-
-- Endpoint: `wss://openspeech.bytedance.com/api/v3/tts/bidirection`
-- Auth headers:
-  - `X-Api-Key: {settings.TTS_API_KEY}`
-  - `X-Api-Resource-Id: {settings.TTS_API_RESOURCE_ID}`
-  - `X-Api-Connect-Id: {uuid4}`
-- Protocol: Custom binary protocol (see Section 11)
-- Audio: 24kHz, 16-bit, mono, PCM
-- Session model: per-sentence (StartSession → TaskRequest → receive PCM → SessionFinished)
-- Voice: `settings.TTS_VOICE`
-- Speech 2.0 subtitles: `TTSSubtitle` event with `words[].startTime/endTime`
-- SSL: system certificate verification enabled
-
-### 10.3 ASR (local)
-
-- Model: `Systran/faster-whisper-base` (via HuggingFace)
-- Config: CPU, int8 quantization
-- VAD: `silero-vad` (optional, falls back to RMS energy)
-- Transcribe params: `language="zh"`, `beam_size=5`
-- Input: 16kHz, 16-bit, mono PCM converted to temp WAV
-- Output: transcribed Chinese text
-
----
-
-## 11. TTS Binary Protocol (Key Values)
-
-Custom binary WebSocket protocol implemented in `app/services/protocols.py`.
-
-### Wire Format (1-byte header row + optional extensions + payload)
-
-```
-Byte 0: [Version(4b) | HeaderSize(4b)]
-Byte 1: [MsgType(4b) | Flags(4b)]
-Byte 2: [Serialization(4b) | Compression(4b)]
-Bytes 3..(4*HeaderSize-1): padding
-Extensions: event(int32), session_id(string), connect_id(string), sequence(int32), error_code(uint32)
-Payload: [size(uint32) | data(bytes)]
-```
-
-### MsgType values used by this project
-
-| Constant | Value | Usage |
-|---|---|---|
-| `FullClientRequest` | `0b0001` (1) | All client→server messages (connect, session, task) |
-| `FullServerResponse` | `0b1001` (9) | Server responses with event + payload (ConnectionStarted, SessionStarted, TTSResponse, etc.) |
-| `AudioOnlyServer` | `0b1011` (11) | PCM audio data from server |
-
-### EventType values used
-
-| Constant | Value | Direction | Purpose |
-|---|---|---|---|
-| `StartConnection` | 1 | C→S | Initiate connection |
-| `FinishConnection` | 2 | C→S | Close connection |
-| `ConnectionStarted` | 50 | S→C | Connection accepted |
-| `StartSession` | 100 | C→S | Begin synthesis session |
-| `FinishSession` | 102 | C→S | End synthesis session (sent before receiving data) |
-| `SessionStarted` | 150 | S→C | Session created |
-| `SessionFinished` | 152 | S→C | Session ended (marks end of AudioOnlyServer stream) |
-| `TaskRequest` | 200 | C→S | Submit text for synthesis |
-| `TTSResponse` | 352 | S→C | Contains `word_boundary` timestamps in JSON payload |
-
-### TTS Session Lifecycle (per sentence)
-
-```
-Client                          Server
-  |                               |
-  |-- StartConnection (event=1) ->|
-  |<- ConnectionStarted (event=50)|
-  |                               |
-  |-- StartSession (event=100) -->|
-  |<- SessionStarted (event=150) -|
-  |-- TaskRequest (event=200) --->|
-  |-- FinishSession (event=102) ->|
-  |<- AudioOnlyServer (PCM) ------|  (multiple messages)
-  |<- SessionFinished (event=152) |
-  |                               |
-  |-- FinishConnection (event=2) >|
-```
-
----
-
-## 12. Database Schema
-
-Database: `output/pdfvox.db` (SQLite, `check_same_thread=False`, `row_factory=sqlite3.Row`)
-
-### Table: `uploads`
-
-```sql
-CREATE TABLE IF NOT EXISTS uploads (
-    file_id TEXT PRIMARY KEY,
-    filename TEXT,
-    path TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### Table: `tasks`
-
-```sql
-CREATE TABLE IF NOT EXISTS tasks (
-    task_id TEXT PRIMARY KEY,
-    file_id TEXT,
-    page INTEGER,
-    status TEXT,
-    detail TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### Key functions (all in `app/models/db.py`)
-
-Each opens and closes its own connection. Returns `dict` (converted from `sqlite3.Row`).
-
-| Function | SQL |
+| 表 | 用途 |
 |---|---|
-| `save_upload(file_id, data)` | `INSERT OR REPLACE INTO uploads` |
-| `get_upload(file_id)` | `SELECT * FROM uploads WHERE file_id = ?` |
-| `list_uploads()` | `SELECT * FROM uploads ORDER BY created_at DESC` |
-| `save_task(task_id, data)` | `INSERT OR REPLACE INTO tasks` |
-| `get_task(task_id)` | `SELECT * FROM tasks WHERE task_id = ?` |
-| `update_task_status(task_id, status, detail)` | `UPDATE tasks SET status=?, detail=?, updated_at=CURRENT_TIMESTAMP` |
-| `list_tasks()` | `SELECT * FROM tasks ORDER BY updated_at DESC` |
+| `uploads` | 文件 ID、原文件名、磁盘路径、总页数 |
+| `tasks` | 生成任务、页码、状态、错误详情和更新时间 |
+| `generated_cache` | 带 TTL 的讲稿、音频和问答历史 JSON |
 
----
+每个数据库函数自行打开和关闭连接。旧数据库缺失 `uploads.total_pages` 时会自动迁移。
 
-## 13. Frontend Architecture
+## 6. 主应用 HTTP 接口
 
-### 13.1 Module Dependencies (ES modules, no bundler)
+### 6.1 页面与健康检查
 
-```
-viewer.js
-  ├── imports: viewer-state.js (state, dom, getQueryParam)
-  ├── imports: viewer-audio.js (initAudioContext, queueAudioChunk, setupPlayerControls, seekToTime)
-  ├── imports: viewer-stream.js (setupExplainAllButton, setupAskButton, resumeExplanation)
-  └── on DOMContentLoaded:
-      ├── fills dom object with element refs
-      ├── loadEntirePDF() → GET /pdf/{id} → lazy-load pages
-      ├── detectCurrentPage() → scroll-based
-      └── calls setupPlayerControls(), setupExplainAllButton(), setupAskButton()
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/` | 上传页 |
+| GET | `/viewer.html?file_id=...` | 阅读与讲解页 |
+| GET | `/status.html` | 任务状态页 |
+| GET | `/api/health` | 返回状态、消息和 `1.0.0` 版本 |
 
-viewer-audio.js
-  └── imports: viewer-state.js (state)
+### 6.2 上传与 PDF
 
-viewer-stream.js
-  ├── imports: viewer-state.js (state)
-  └── imports: viewer-audio.js (queueAudioChunk) — only for SSE audio events
-```
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/upload/` | multipart 字段 `file`；仅 PDF；返回 `file_id` 和总页数 |
+| GET | `/pdf/{file_id}` | 返回文件名和页码数组 |
+| GET | `/pdf/{file_id}/page/{page}` | 返回页面文本和 base64 PNG data URL |
 
-### 13.2 Shared State (`viewer-state.js` — `state` object)
+上传过程按 1 MB 分块写入，超限、空文件、损坏文件都会删除临时目标文件并返回 4xx。
 
-| Field | Type | Set by | Used by |
-|---|---|---|---|
-| `totalPages` | int | viewer.js (loadEntirePDF) | audio.js, stream.js |
-| `currentPage` | int | viewer.js (detectCurrentPage) | audio.js, stream.js |
-| `audioCtx` | AudioContext | audio.js (initAudioContext) | audio.js |
-| `nextPlayTime` | float | audio.js (queueAudioChunk) | audio.js |
-| `audioQueue` | array | audio.js (queueAudioChunk, seekToTime) | audio.js |
-| `isProcessingQueue` | bool | audio.js (processAudioQueue) | audio.js |
-| `currentPlayingPage` | int | audio.js (processAudioQueue) | audio.js, viewer.js |
-| `resumePage` | int | stream.js (_startExplainStream) | stream.js |
-| `currentEventSource` | EventSource | stream.js (_startExplainStream) | stream.js |
-| `currentStreamAbort` | function | stream.js | stream.js |
-| `isQaActive` | bool | stream.js | stream.js |
-| `playedTime` | float | audio.js (processAudioQueue) | audio.js, stream.js |
-| `liveWindowEnd` | float | audio.js (queueAudioChunk) | audio.js |
-| `pageTimeMap` | array | audio.js | audio.js |
-| `sentenceStartTimes` | array[dict] | audio.js (queueAudioChunk) | audio.js (seekToTime) |
-| `playbackStartTime` | float | audio.js | audio.js |
-| `progressInterval` | intervalID | audio.js (setupPlayerControls) | audio.js |
-| `seekAbortController` | AbortController | audio.js (seekToTime) | audio.js |
-| `isSeeking` | bool | audio.js | audio.js |
-| `isDragging` | bool | audio.js | audio.js |
-| `currentWordTimestamps` | array | audio.js (queueAudioChunk) | audio.js (updateProgressUI) |
-| `currentSentenceStartTime` | float | audio.js (queueAudioChunk) | audio.js (updateProgressUI) |
+### 6.3 讲解
 
-### 13.3 Key Frontend Functions
+| 方法 | 路径 | 关键参数 |
+|---|---|---|
+| GET | `/explain/all-stream-v3/{file_id}` | `course_name`、`from_page`、`skip_sentences`、`resume_generation`、`session_id` |
+| GET | `/explain/stream-v3/{file_id}/page/{page_num}` | `course_name`、`session_id` |
+| GET | `/explain/playback/seek/{file_id}/page/{page_num}` | `time_offset`、`ahead`、`course_name` |
+| DELETE | `/explain/cancel/{file_id}` | 必填 `session_id` |
+| GET | `/explain/status/{task_id}` | 查询任务状态 |
 
-**viewer-audio.js**:
-- `initAudioContext()` — creates AudioContext + GainNode
-- `queueAudioChunk(base64, page, sentence, duration, wordTimestamps)` — base64→ArrayBuffer→Int16Array→AudioBuffer→schedule BufferSource, records sentenceStartTimes
-- `processAudioQueue()` — queue consumer: sets active page, renders subtitle with `<span class="sc">`, plays, waits for `onended`
-- `seekToTime(targetSeconds)` — binary search sentenceStartTimes, fetch `/explain/playback/seek`, rebuild queue
-- `updateProgressUI()` — setInterval(100ms): progress slider, time label, `_highlightActiveWord()` via matching currentTime to word_timestamp index
-- `setupPlayerControls()` — play/pause, progress slider drag, volume, keyboard arrows (±5s)
+`all-stream-v3` 和 `stream-v3` 响应头包含 `X-Task-Id`。`playback/seek` 是服务端缓存回放接口；当前 Web 播放器的常规拖动优先使用浏览器已经保存的音频，不依赖该接口。
 
-**viewer-stream.js**:
-- Button state machine: `IDLE → GENERATING → PAUSED` with button text toggle
-- `_startExplainStream(courseName)` — creates EventSource, dispatches onmessage to json parse → page_start/audio/end/error/cancelled
-- `setupExplainAllButton()` — wires state machine to button
-- `setupAskButton()` — getUserMedia → MediaRecorder → silence detection → _convertBlobTo16kWav() → POST /qa/ask/stream → show answer panel
-- `_convertBlobTo16kWav(blob)` — OfflineAudioContext resample to 16kHz + WAV header
-- `_encodeWAV(samples, sampleRate)` — manual WAV header construction
-- `resumeExplanation(fileId, courseName)` — reconnects EventSource from resumePage
+### 6.4 问答
 
----
+`POST /qa/ask/stream` 使用 multipart/form-data：
 
-## 14. Key Architecture Patterns
+| 字段 | 要求 |
+|---|---|
+| `file_id` | 必填 |
+| `page_num` | 必填，默认 1，不能超出文档页数 |
+| `session_id` | 必填，至少 8 个字符 |
+| `course_name` | 可选，默认“课程” |
+| `question` | 文本问题；与 `file` 至少提供一个 |
+| `file` | WAV 或原始 PCM；默认最大 10 MB |
 
-### 14.1 LLM+TTS Dual-Stream Concurrency
+## 7. SSE 协议
 
-Both `ExplainService.explain_page_realtime_stream()` and `QAService.stream_qa_response()` use the same pattern:
+每条消息格式为：
 
-```
-asyncio.create_task(run_llm())  → writes text chunks to text_queue
-asyncio.sleep(0.1 or 0.05)      → ensures consumer exists before producer
-asyncio.create_task(run_tts())  → reads from text_queue, writes audio events to out_queue
-Main loop                        → reads out_queue, yields to SSE
+```text
+data: {JSON}\n\n
 ```
 
-LLM task puts `"<END>"` sentinel when done. TTS task puts `"<DONE>"` sentinel when done.
+流结束哨兵为：
 
-### 14.2 TTS Text Splitter
+```text
+data: [DONE]\n\n
+```
 
-`TTSService.stream_tts_input()` processes text asynchronously:
-1. Pre-connects WebSocket while waiting for first text chunk
-2. On first text: launches `text_splitter` background task
-3. Splitter accumulates text, extracts sentences by delimiter (`。！？，；\n!?,;`), force-flushes at 60 chars or on stream end
-4. Sentences queued → `_synthesize_sentence()` per sentence (each creates its own WebSocket session)
-5. `None` sentinel marks splitter completion
+主要事件：
 
-### 14.3 Cancellation
+| `type` | 重要字段 | 含义 |
+|---|---|---|
+| `global_start` | `task_id`, `total_pages` | 全书生成开始 |
+| `page_start` | `page` | 当前页开始 |
+| `start` | `page` | 单页流水线开始 |
+| `text` | `data`, `page` | LLM 文本片段；问答会向客户端发送 |
+| `audio` | `data`, `page`, `index`, `sentence`, `duration`, `word_timestamps` | 一句 PCM 音频 |
+| `end` | `page` | 单页流水线结束 |
+| `page_complete` | `page`, `total_pages` | 全书流中的页面完成 |
+| `global_end` | `task_id` | 全书完成 |
+| `cancelled` | `ts` | 当前会话已取消 |
+| `error` | `message`, `page?` | 可展示错误 |
 
-`ExplainService._cancel_tokens: dict[str, bool]` checked in three places:
-- LLM task loop (stops yielding text chunks)
-- TTS task's `tts_input_stream()` generator (stops feeding text)
-- Main event loop (stops reading from out_queue)
+音频事件示例：
 
-Set via `DELETE /explain/cancel/{file_id}`. Reset at start of `all-stream-v3`.
+```json
+{
+  "type": "audio",
+  "data": "<base64 PCM>",
+  "page": 3,
+  "index": 2,
+  "sentence": "监督学习需要标注数据。",
+  "duration": 2.48,
+  "word_timestamps": [
+    {"char": "监", "start": 0.08, "end": 0.23}
+  ]
+}
+```
 
-### 14.4 Caching Strategy (no eviction, no TTL)
+## 8. 前端关键状态与不变量
 
-1. **Page summaries** (`summary_cache[file_id][page_num]`): generated by LLM sync call, used for adjacent page context. Prefetched 2 pages ahead.
-2. **Full scripts** (`summary_cache[f"script_{file_id}_{page_num}"]`): generated by LLM sync call, used for DVR seek and Q&A context.
-3. **Page audio** (`page_audio_cache[file_id][page_num]`): list of {sentence, audio b64, duration, word_timestamps}. Hit = instant replay, no TTS call needed.
+`viewer-state.js` 的 `state` 是各 ES 模块共享的唯一可变状态。修改播放器时必须保持以下不变量：
 
-### 14.5 PDF Thread Safety
+1. `generatedAudioChunks` 是已经到达浏览器的讲解音频真源；seek 只能从这里重建队列。
+2. `timelineCursor` 是下一条新音频的写入位置，只在 `trackTimeline=true` 的首次接收时增长。
+3. `liveWindowEnd` 是当前已生成音频的总时长，进度条 `max` 和总时长标签必须使用它。
+4. 回放旧音频时必须传 `trackTimeline=false`，否则总时长会重复增长。
+5. `playedTime` 使用音频内容时间；播放倍速只改变墙上时间，不改变时间轴总长度。
+6. `playbackEpoch` 用于废弃旧播放器循环，seek/停止后旧 `onended` 不得覆盖新状态。
+7. `currentSentenceStartTime` 与完整句子的时间戳共同决定字级高亮。
+8. QA 音频不计入讲解时间轴。
+9. 新生成流程可以重置时间轴；“继续生成”必须使用 `skipReset=true` 保留已有音频。
+10. `sessionId` 保存在 `sessionStorage`，用于取消与问答历史隔离，但它不是身份认证凭据。
 
-`PDFService._locks: dict[str, threading.Lock]` — one lock per file path. All `get_page_text()`, `get_page_image()`, `list_pages()` acquire the lock. Paths are resolved via `_resolve_path()`: relative paths joined with `STORAGE_PATH` using only the filename component.
+## 9. 配置
 
-### 14.6 Logging
+复制 `.env.example` 为 `.env`：
 
-`get_logger(name)` in `app/utils/logging.py` is a factory that configures the root logger once (module-level `_configured` flag). Format: `"%(asctime)s - %(name)s - %(levelname)s - %(message)s"`. Output to `log.txt` (UTF-8) + optional console. Level from `settings.LOG_LEVEL`.
+```env
+LLM_API_KEY=your_llm_api_key_here
+LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+LLM_MODEL=doubao-seed-2-0-mini-260428
+TTS_API_KEY=your_tts_api_key_here
+TTS_API_RESOURCE_ID=seed-tts-2.0
+TTS_VOICE=zh_female_yingyujiaoxue_uranus_bigtts
+STORAGE_PATH=output
+MAX_UPLOAD_SIZE_MB=50
+MAX_AUDIO_SIZE_MB=10
+CACHE_TTL_SECONDS=21600
+SUMMARY_CACHE_MAX_ENTRIES=256
+AUDIO_CACHE_MAX_ENTRIES=32
+GENERATED_CACHE_MAX_ENTRIES=128
+QA_HISTORY_MAX_DOCUMENTS=100
+```
 
----
+此外可配置 `HOST`、`PORT`、`AUTO_RELOAD`、`LOG_LEVEL` 和 `LOG_TO_CONSOLE`。相对路径统一相对于仓库根目录解析，因此可以从其他工作目录启动。
 
-## 15. Known Issues / Caveats
+不要提交真实 `.env`、API 密钥、上传文档、SQLite 数据库、生成音频或日志。
 
-1. **Two ExplainService instances**: `ai_explain.py` and `qa.py` each instantiate their own `ExplainService()`. The cancel token set by the `/explain` router will NOT affect the `/qa` router's ExplainService, and vice versa. Caches are also not shared between routers.
+## 10. 启动与测试
 
-2. **VAD return value ignored**: In `ASRService.transcribe_pcm_to_text()` (asr_service.py line 114), `_vad_check()` is called but its return value is discarded — transcription proceeds regardless of VAD result. The `detect_speaking_from_pcm()` method correctly uses it.
+推荐使用名为 `PDFVox` 的 Conda 环境：
 
-3. **TTS SSL verification disabled**: `ssl.CERT_NONE` is set in `TTSService._connect()`.
+```powershell
+conda activate PDFVox
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+python run.py
+```
 
-4. **No authentication**: The entire API is unauthenticated. All routes are public.
+测试：
 
-5. **No concurrency control on caches**: Multiple concurrent requests for the same page may trigger duplicate LLM/TTS calls before the first one caches the result.
+```powershell
+python -m pytest -q
+```
 
-6. **`tts_server.py`**: Exists at project root but references a `TTSService.synthesize()` method not in the current codebase. It is dead code and not used by the main app.
+`pytest.ini` 只收集 `tests/`，避免把依赖真实麦克风、模型或外部 API 的脚本误当成自动化测试。当前 v1.0.0 基线为 27 项测试，覆盖：
 
-7. **`MODEL_ENDPOINT` config**: Defined in `Settings` but never read by any code.
+- API 参数与恢复生成；
+- 路径配置和 SQLite 持久缓存；
+- TTL/LRU 缓存淘汰；
+- 会话级取消隔离和部分页面不缓存；
+- PCM 精确裁剪及字时间戳重定位；
+- 前端回放不重复扩展总时长；
+- LLM 响应兼容；
+- TTS 字幕协议和错误事件；
+- ASR 延迟加载；
+- QA 历史隔离和五轮上限；
+- 主应用与独立 TTS 服务版本元数据。
+
+## 11. 已知边界
+
+- 主应用没有用户认证或授权，不应直接暴露到不受信任的公网。
+- 浏览器刷新会丢失客户端的播放位置和本地音频时间轴；服务端生成缓存仍可能可用。
+- SQLite 和进程内共享实例面向单机部署；多进程/多节点需要共享数据库、分布式缓存和任务协调。
+- 首次语音识别可能下载并加载较大的 ASR/VAD 模型，启动后第一次识别延迟较高。
+- 讲解和 TTS 依赖外部火山引擎服务、有效密钥、模型权限和网络连接。
+- 当前前端没有构建步骤，也没有浏览器端 E2E 测试；前端行为主要由 Python 静态检查测试和人工浏览器验证保障。
+- `doc/` 被 `.gitignore` 忽略；其中资料不属于发布内容。
+
+## 12. 维护规则
+
+- 修改版本时只编辑 `app/version.py`，再同步本文与 README 的展示文本，并创建同名 Git 标签。
+- 修改 SSE 字段时，同时检查路由、`viewer-stream.js`、`viewer-audio.js` 和测试。
+- 修改音频时间轴时，优先验证“新音频追加”和“旧音频回放”不会同时增长 `liveWindowEnd`。
+- 修改续接生成时，必须验证停止后已有音频不消失、恢复页不重复、部分页能继续生成。
+- 修改字幕时，必须验证普通播放、页内 seek、倍速和无时间戳降级路径。
+- 不要在事件循环中直接执行 PDF、SQLite、同步 LLM 或 WAV 写入等阻塞操作；使用 `asyncio.to_thread`。
+- 新功能至少补充对应自动化测试，并保持 `python -m pytest -q` 全部通过。
