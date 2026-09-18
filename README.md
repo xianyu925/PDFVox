@@ -67,9 +67,11 @@ PDFVox/
 
 ### Windows 桌面版
 
+普通用户可直接下载 [PDFVox-Setup-v1.1.0.exe](release/PDFVox-Setup-v1.1.0.exe)，无需安装 Python 或 Conda。具体步骤、安全校验、升级和卸载说明见 [Windows 安装指南](INSTALL.md)。
+
 桌面版首次启动只需填写 `LLM API Key` 和 `TTS API Key`。密钥保存在 Windows 凭据管理器，上传文件、数据库、日志和模型缓存保存在 `%LOCALAPPDATA%\PDFVox`。
 
-构建安装包请参阅 [PACKAGING.md](PACKAGING.md)。
+开发者构建安装包请参阅 [PACKAGING.md](PACKAGING.md)。
 
 ### 1. 安装依赖
 

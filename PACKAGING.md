@@ -37,6 +37,7 @@ ASR 复用 faster-whisper 自带的 ONNX VAD，不捆绑 PyTorch。当前 Window
 ```text
 dist\PDFVox\                 # PyInstaller onedir，用于冒烟测试
 release\PDFVox-Setup-v1.1.0.exe
+release\SHA256SUMS.txt
 ```
 
 ## 发布前验证
@@ -60,4 +61,6 @@ release\PDFVox-Setup-v1.1.0.exe
 
 构建脚本会从 `app/version.py` 读取版本号并传给 Inno Setup。
 
-构建目录和安装包不要提交到 Git。用户数据位于安装目录之外，覆盖安装和卸载默认不会删除用户 PDF、缓存或密钥。
+`build/` 与 `dist/` 不要提交到 Git。对外发布的 `release/*.exe` 使用 Git LFS 管理，首次克隆或拉取发布产物前需安装 Git LFS；`SHA256SUMS.txt` 由构建脚本自动生成，并与安装包一起提交。
+
+用户数据位于安装目录之外，覆盖安装和卸载默认不会删除用户 PDF、缓存或密钥。

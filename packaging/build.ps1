@@ -40,6 +40,15 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup build failed with exit code $LASTEXITCODE"
     }
+
+    $installerPath = Join-Path `
+        $projectRoot `
+        "release\PDFVox-Setup-v$appVersion.exe"
+    $installerHash = (Get-FileHash $installerPath -Algorithm SHA256).Hash
+    Set-Content `
+        -LiteralPath (Join-Path $projectRoot "release\SHA256SUMS.txt") `
+        -Value "$installerHash  PDFVox-Setup-v$appVersion.exe" `
+        -Encoding ascii
 } finally {
     Pop-Location
 }
