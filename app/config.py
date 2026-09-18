@@ -1,7 +1,10 @@
 import os
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from app.credentials import LLM_KEY_NAME, TTS_KEY_NAME, load_api_key
+from app.paths import resource_root
+
+PROJECT_ROOT = resource_root()
 
 try:
     from dotenv import load_dotenv
@@ -21,8 +24,8 @@ def _resolve_project_path(value: str) -> Path:
 
 class Settings:
     # Current names, with backward-compatible fallbacks for older .env files.
-    LLM_API_KEY: str = os.getenv("LLM_API_KEY", os.getenv("API_KEY", ""))
-    TTS_API_KEY: str = os.getenv("TTS_API_KEY", os.getenv("API_APP_KEY", ""))
+    LLM_API_KEY: str = load_api_key(LLM_KEY_NAME, "API_KEY")
+    TTS_API_KEY: str = load_api_key(TTS_KEY_NAME, "API_APP_KEY")
     TTS_API_RESOURCE_ID: str = os.getenv(
         "TTS_API_RESOURCE_ID", "seed-tts-2.0"
     )
@@ -33,7 +36,9 @@ class Settings:
         "LLM_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"
     )
 
-    TTS_VOICE: str = os.getenv("TTS_VOICE", "")
+    TTS_VOICE: str = os.getenv(
+        "TTS_VOICE", "zh_female_yingyujiaoxue_uranus_bigtts"
+    )
     PROJECT_ROOT: Path = PROJECT_ROOT
     WEB_PATH: Path = PROJECT_ROOT / "web"
     STORAGE_PATH: str = str(
@@ -63,6 +68,14 @@ class Settings:
         "yes",
     )
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FILE: str = str(
+        _resolve_project_path(os.getenv("LOG_FILE", "log.txt"))
+    )
+    LOG_TO_FILE: bool = os.getenv("LOG_TO_FILE", "True").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     LOG_TO_CONSOLE: bool = os.getenv("LOG_TO_CONSOLE", "True").lower() in (
         "1",
         "true",

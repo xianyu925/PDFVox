@@ -89,8 +89,13 @@ class QAService:
             settings.GENERATED_CACHE_MAX_ENTRIES,
         )
         logger.info(
-            f"[QA多轮] 已保存第 {len(rounds)} 轮对话 | "
-            f"Q: {question[:50]}... → A: {answer[:50]}..."
+            "[QA多轮] 已保存第 %s 轮对话 | file_id=%s session=%s "
+            "question_chars=%s answer_chars=%s",
+            len(rounds),
+            file_id,
+            session_id[:8],
+            len(question),
+            len(answer),
         )
 
     async def _history_text(self, file_id: str, session_id: str) -> tuple[str, int]:

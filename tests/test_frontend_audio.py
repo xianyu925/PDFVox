@@ -49,6 +49,17 @@ if (dom.timeTotal.textContent !== '00:02') {
 if (state.generatedAudioChunks.length !== 2) {
     throw new Error('cached replay was recorded as newly generated audio');
 }
+
+// QA audio must be classified explicitly and must never extend the lecture
+// timeline, even if the global QA flag changes before it is processed.
+state.isQaActive = false;
+await queueAudioChunk(oneSecondPcm, 1, 'qa answer', 1, [], { isQa: true });
+if (state.liveWindowEnd !== 2 || state.timelineCursor !== 2) {
+    throw new Error('QA audio changed the lecture progress range');
+}
+if (!state.audioQueue[state.audioQueue.length - 1].isQa) {
+    throw new Error('QA audio lost its explicit queue classification');
+}
 if (getPageAudioStart(1) !== 0 || getPageAudioStart(2) !== null) {
     throw new Error('page audio start lookup returned the wrong result');
 }
@@ -146,6 +157,16 @@ stopProgressSync();
             capture_output=True,
             text=True,
         )
+
+    def test_qa_resume_uses_the_existing_timeline(self):
+        source = (PROJECT_ROOT / "web" / "static" / "viewer-stream.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("state.qaReturnTime = getCurrentPlaybackTime()", source)
+        self.assertIn("seekToTime(state.qaReturnTime, { autoplay })", source)
+        self.assertIn("_startExplainStream(courseName, { skipReset: true })", source)
+        self.assertIn("{ trackTimeline: false, isQa: true }", source)
 
 
 if __name__ == "__main__":

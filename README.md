@@ -4,7 +4,7 @@
 
 PDFVox 将 PDF 课程讲义自动转化为第一人称 AI 教授的口语化讲解，前端以流式方式同步播放语音与字幕，支持时间轴拖动、字级字幕高亮、录音问答等交互。PPT/PPTX 课件需要先导出为 PDF。
 
-**当前版本**：`v1.0.0`
+**当前版本**：`v1.1.0`
 
 **核心流程**：上传 PDF → 多模态 LLM 逐页生成讲稿 → TTS 逐句合成语音 → 浏览器实时播放
 
@@ -42,7 +42,7 @@ PDFVox/
 │   │   ├── qa_service.py         # 问答服务：多轮历史、prompt 构建
 │   │   ├── llm_service.py        # 火山引擎 doubao 多模态 API
 │   │   ├── tts_service.py        # 火山引擎双向 WebSocket TTS
-│   │   ├── asr_service.py        # faster-whisper + Silero VAD 语音识别
+│   │   ├── asr_service.py        # faster-whisper ASR + 内置 ONNX VAD
 │   │   ├── pdf_service.py        # pdfplumber 页面渲染 (150 DPI)
 │   │   └── protocols.py          # 火山 TTS WebSocket 二进制协议
 │   └── utils/
@@ -64,6 +64,12 @@ PDFVox/
 ```
 
 ## 快速开始
+
+### Windows 桌面版
+
+桌面版首次启动只需填写 `LLM API Key` 和 `TTS API Key`。密钥保存在 Windows 凭据管理器，上传文件、数据库、日志和模型缓存保存在 `%LOCALAPPDATA%\PDFVox`。
+
+构建安装包请参阅 [PACKAGING.md](PACKAGING.md)。
 
 ### 1. 安装依赖
 
@@ -87,6 +93,7 @@ TTS_VOICE=zh_female_yingyujiaoxue_uranus_bigtts
 STORAGE_PATH=output
 MAX_UPLOAD_SIZE_MB=50
 LOG_LEVEL=INFO
+LOG_TO_FILE=true
 LOG_TO_CONSOLE=true
 ```
 
@@ -158,7 +165,7 @@ LOG_LEVEL=ERROR python run.py
 | 后端框架 | FastAPI + uvicorn |
 | LLM | 火山引擎 doubao-seed (多模态) |
 | TTS | 火山引擎双向 WebSocket TTS (24kHz PCM) |
-| ASR | faster-whisper + Silero VAD |
+| ASR | faster-whisper（CPU int8 + 内置 ONNX VAD） |
 | PDF | pdfplumber (150 DPI 渲染) |
 | 前端 | 原生 ES 模块，Web Audio API，SSE |
 | 存储 | SQLite (上传记录) |

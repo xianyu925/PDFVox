@@ -1,5 +1,14 @@
 import { state, dom, getQueryParam } from './viewer-state.js';
-import { initAudioContext, queueAudioChunk, startProgressSync, stopCurrentAudio } from './viewer-audio.js';
+import {
+    getCurrentPlaybackTime,
+    initAudioContext,
+    queueAudioChunk,
+    seekToTime,
+    startProgressSync,
+    stopCurrentAudio,
+    stopProgressSync,
+    updateProgressUI,
+} from './viewer-audio.js';
 
 // ---- 按钮状态机 ----
 
@@ -154,6 +163,37 @@ function _startExplainStream(courseName, { skipReset = false } = {}) {
 
 let _cancelFn = null;
 
+function _leaveQaMode() {
+    state.isQaActive = false;
+    dom.progressSlider.disabled = false;
+    state.playedTime = Math.max(
+        0,
+        Math.min(state.qaReturnTime, state.liveWindowEnd || state.qaReturnTime),
+    );
+    updateProgressUI();
+}
+
+async function _restoreLectureAfterQa(
+    courseName,
+    { autoplay = false, resumeGeneration = false } = {},
+) {
+    stopCurrentAudio();
+    state.audioQueue = [];
+    state.isProcessingQueue = false;
+    _leaveQaMode();
+
+    if (state.generatedAudioChunks.length > 0) {
+        await seekToTime(state.qaReturnTime, { autoplay });
+    } else if (!autoplay && state.audioCtx?.state === 'running') {
+        await state.audioCtx.suspend();
+    }
+
+    if (resumeGeneration && state.qaResumeGeneration) {
+        _cancelFn = await _startExplainStream(courseName, { skipReset: true });
+    }
+    state.qaResumeGeneration = false;
+}
+
 // ---- 一键生成讲解按钮 ----
 
 export function setupExplainAllButton() {
@@ -186,9 +226,10 @@ export function setupExplainAllButton() {
 // ---- 恢复讲解（从问答返回时调用） ----
 
 async function resumeExplanation(courseName) {
-    state.isQaActive = false;
-    dom.progressSlider.disabled = false;
-    _cancelFn = await _startExplainStream(courseName);
+    await _restoreLectureAfterQa(courseName, {
+        autoplay: true,
+        resumeGeneration: true,
+    });
 }
 
 export async function continueExplainStream(fromPage) {
@@ -209,10 +250,22 @@ export function setupAskButton() {
         const courseName = dom.courseNameInput.value.trim();
         if (!fileId) return alert('缺少 file_id');
 
+        state.qaReturnTime = getCurrentPlaybackTime();
+        state.playedTime = state.qaReturnTime;
         state.resumePage = state.currentPlayingPage || state.currentPage;
+        state.qaResumeGeneration = Boolean(state.currentEventSource && _cancelFn);
         state.isQaActive = true;
+        stopProgressSync();
 
-        if (state.currentEventSource) { try { state.currentEventSource.close(); } catch (e) { } state.currentEventSource = null; }
+        if (state.qaResumeGeneration && _cancelFn) {
+            const cancel = _cancelFn;
+            _cancelFn = null;
+            await cancel();
+            _setExplainButton(BTN_PAUSED);
+        } else if (state.currentEventSource) {
+            try { state.currentEventSource.close(); } catch (e) { }
+            state.currentEventSource = null;
+        }
         stopCurrentAudio();
         if (state.audioCtx) try { await state.audioCtx.suspend(); } catch (e) { }
         if (dom.playIcon && dom.pauseIcon) {
@@ -259,8 +312,10 @@ export function setupAskButton() {
             progressContainer.remove();
             dom.askBtn.textContent = originalText;
             dom.askBtn.disabled = false;
-            state.isQaActive = false;
-            dom.progressSlider.disabled = false;
+            await _restoreLectureAfterQa(courseName, {
+                autoplay: true,
+                resumeGeneration: true,
+            });
         });
 
         try {
@@ -270,8 +325,10 @@ export function setupAskButton() {
             progressContainer.remove();
             dom.askBtn.textContent = originalText;
             dom.askBtn.disabled = false;
-            state.isQaActive = false;
-            dom.progressSlider.disabled = false;
+            await _restoreLectureAfterQa(courseName, {
+                autoplay: true,
+                resumeGeneration: true,
+            });
             return;
         }
 
@@ -346,29 +403,36 @@ export function setupAskButton() {
                         if (!line) continue;
                         if (line === '[DONE]') {
                             progressContainer.innerHTML = `
-                                <div id="ask-info" style="font-size:14px; font-weight:600; color:#0f172a; margin-bottom:8px;">回答播放完毕</div>
+                                <div id="ask-info" style="font-size:14px; font-weight:600; color:#0f172a; margin-bottom:8px;">回答已生成</div>
                                 <button id="resume-stream" style="width:100%; padding:8px 12px; background:#4f46e5; color:white; border:none; border-radius:6px; cursor:pointer; margin-bottom:6px;">▶ 继续讲解</button>
                                 <button id="qa-done-close" style="width:100%; padding:8px 12px; background:#e2e8f0; color:#334155; border:none; border-radius:6px; cursor:pointer;">关闭</button>
                             `;
-                            document.getElementById('resume-stream').addEventListener('click', () => {
+                            document.getElementById('resume-stream').addEventListener('click', async () => {
                                 progressContainer.remove();
-                                resumeExplanation(courseName);
+                                await resumeExplanation(courseName);
                             });
-                            document.getElementById('qa-done-close').addEventListener('click', () => {
+                            document.getElementById('qa-done-close').addEventListener('click', async () => {
                                 progressContainer.remove();
-                                state.isQaActive = false;
-                                dom.progressSlider.disabled = false;
+                                await _restoreLectureAfterQa(courseName, {
+                                    autoplay: false,
+                                    resumeGeneration: false,
+                                });
                             });
                             dom.askBtn.textContent = originalText;
                             dom.askBtn.disabled = false;
-                            state.isQaActive = false;
-                            dom.progressSlider.disabled = false;
                             break;
                         }
                         try {
                             const payload = JSON.parse(line);
                             if (payload.type === 'audio' && payload.data) {
-                                queueAudioChunk(payload.data, payload.page || state.currentPage, payload.sentence, payload.duration || 0, payload.word_timestamps || []);
+                                queueAudioChunk(
+                                    payload.data,
+                                    payload.page || state.currentPage,
+                                    payload.sentence,
+                                    payload.duration || 0,
+                                    payload.word_timestamps || [],
+                                    { trackTimeline: false, isQa: true },
+                                );
                             } else if (payload.type === 'error') {
                                 document.getElementById('ask-info').textContent = '错误: ' + (payload.message || payload.data || '未知错误');
                             }
@@ -383,8 +447,10 @@ export function setupAskButton() {
                 progressContainer.remove();
                 dom.askBtn.textContent = originalText;
                 dom.askBtn.disabled = false;
-                state.isQaActive = false;
-                dom.progressSlider.disabled = false;
+                await _restoreLectureAfterQa(courseName, {
+                    autoplay: false,
+                    resumeGeneration: false,
+                });
             }
         };
     });

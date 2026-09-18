@@ -37,6 +37,32 @@ class ConfigPathTests(unittest.TestCase):
 
         self.assertEqual(PROJECT_ROOT / "output", Path(result.stdout.strip()))
 
+    def test_file_logging_can_be_disabled_for_automated_tests(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(PROJECT_ROOT)
+            env["LOG_TO_FILE"] = "false"
+            env["LOG_TO_CONSOLE"] = "false"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "from app.utils.logging import get_logger; "
+                        "get_logger('test').warning('test-only'); "
+                        "print(Path('log.txt').exists())"
+                    ),
+                ],
+                cwd=temp_dir,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual("False", result.stdout.strip())
+
 
 if __name__ == "__main__":
     unittest.main()

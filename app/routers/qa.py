@@ -43,6 +43,14 @@ async def ask_question_stream(
     if page_num > total_pages:
         raise HTTPException(status_code=422, detail="page_num exceeds PDF page count")
 
+    logger.info(
+        "[QA请求] file_id=%s page=%s session=%s input=%s",
+        file_id,
+        page_num,
+        session_id[:8],
+        "text" if question else "audio",
+    )
+
     async def generate_stream():
         try:
             transcript = ""

@@ -9,9 +9,6 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-load_silero_vad = None
-get_speech_timestamps = None
-
 DEFAULT_SAMPLE_RATE = 16000
 
 
@@ -19,37 +16,32 @@ class ASRService:
 
     def __init__(self):
         self.whisper_model = None
-        self.vad_model = None
+        self._vad_function = None
+        self._vad_options = None
         self._vad_load_attempted = False
         self._vad_lock = threading.Lock()
         self._whisper_lock = threading.Lock()
 
     def _get_vad(self):
-        global load_silero_vad, get_speech_timestamps
         if self._vad_load_attempted:
-            return self.vad_model
+            return self._vad_function
         with self._vad_lock:
             if self._vad_load_attempted:
-                return self.vad_model
+                return self._vad_function
             self._vad_load_attempted = True
-            if load_silero_vad is None:
-                try:
-                    from silero_vad import (
-                        get_speech_timestamps as speech_timestamps,
-                        load_silero_vad as load_vad,
-                    )
+            try:
+                from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-                    load_silero_vad = load_vad
-                    get_speech_timestamps = speech_timestamps
-                except Exception as e:
-                    logger.warning(f"Silero VAD is unavailable: {e}")
-            if load_silero_vad:
-                try:
-                    self.vad_model = load_silero_vad()
-                    logger.info("Silero VAD model loaded")
-                except Exception as e:
-                    logger.warning(f"Failed to load Silero VAD model: {e}")
-        return self.vad_model
+                self._vad_function = get_speech_timestamps
+                self._vad_options = VadOptions(
+                    min_speech_duration_ms=100,
+                    min_silence_duration_ms=100,
+                    speech_pad_ms=30,
+                )
+                logger.info("Faster Whisper VAD initialized")
+            except Exception as e:
+                logger.warning(f"Faster Whisper VAD is unavailable: {e}")
+        return self._vad_function
 
     def _get_whisper(self):
         if self.whisper_model is not None:
@@ -83,21 +75,18 @@ class ASRService:
         return self.whisper_model
 
     def _vad_check(self, pcm_bytes: bytes, sample_rate: int) -> Optional[bool]:
-        vad_model = self._get_vad()
-        if not (vad_model and get_speech_timestamps):
+        vad_function = self._get_vad()
+        if not vad_function:
             return None
         try:
             import numpy as np
-            import torch
 
             samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
             samples /= 32768.0
-            waveform = torch.from_numpy(samples)
-            stamps = get_speech_timestamps(
-                waveform,
-                vad_model,
+            stamps = vad_function(
+                samples,
+                self._vad_options,
                 sampling_rate=sample_rate,
-                return_seconds=True,
             )
             return bool(stamps)
         except Exception as e:

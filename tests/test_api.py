@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.routers import ai_explain
+from app.services.settings_service import CredentialStatus
+from app.version import __version__
 
 
 class APITests(unittest.TestCase):
@@ -15,15 +17,29 @@ class APITests(unittest.TestCase):
     def test_health(self):
         response = self.client.get("/api/health")
         self.assertEqual(200, response.status_code)
-        self.assertEqual("1.0.0", response.json()["version"])
-        self.assertEqual("1.0.0", app.version)
+        self.assertEqual(__version__, response.json()["version"])
+        self.assertEqual(__version__, app.version)
 
     def test_viewer_exposes_all_playback_rates(self):
-        response = self.client.get("/viewer.html")
+        with patch(
+            "app.main.settings_service.status",
+            return_value=CredentialStatus(True, True),
+        ):
+            response = self.client.get("/viewer.html")
         self.assertEqual(200, response.status_code)
         self.assertIn('id="playback-rate"', response.text)
         for rate in ("0.5", "0.75", "1", "1.25", "1.5", "2"):
             self.assertIn(f'value="{rate}"', response.text)
+
+    def test_first_run_shows_setup_instead_of_upload_page(self):
+        with patch(
+            "app.main.settings_service.status",
+            return_value=CredentialStatus(False, False),
+        ):
+            response = self.client.get("/")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn("首次使用只需填写两个 API Key", response.text)
 
     def test_cancel_requires_a_session_id(self):
         response = self.client.delete("/explain/cancel/document-1")

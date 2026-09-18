@@ -169,7 +169,12 @@ export async function queueAudioChunk(
     sentence,
     duration,
     wordTimestamps,
-    { trackTimeline = true, playbackOffset = 0, chunkIndex = null } = {},
+    {
+        trackTimeline = true,
+        playbackOffset = 0,
+        chunkIndex = null,
+        isQa = state.isQaActive,
+    } = {},
 ) {
     if (!state.audioCtx) return;
     // The PCM payload is the source of truth. This also prevents a string
@@ -181,7 +186,7 @@ export async function queueAudioChunk(
     const d = base64Data
         ? Math.max(0, fullDuration - offset)
         : fullDuration;
-    if (!state.isQaActive && trackTimeline) {
+    if (!isQa && trackTimeline) {
         const normalizedIndex = Number(chunkIndex);
         const chunkKey = Number.isInteger(normalizedIndex) && normalizedIndex > 0
             ? `${page}:${normalizedIndex}`
@@ -207,7 +212,7 @@ export async function queueAudioChunk(
         data: base64Data, page: page,
         sentence: sentence || '', duration: d,
         wordTimestamps: wordTimestamps || [],
-        isQa: state.isQaActive,
+        isQa,
         playbackOffset: offset,
     });
     if (!state.isProcessingQueue) {
@@ -353,7 +358,7 @@ function _findGeneratedChunkIndex(targetSeconds) {
     return Math.min(lo, chunks.length);
 }
 
-export async function seekToTime(targetSeconds) {
+export async function seekToTime(targetSeconds, { autoplay = true } = {}) {
     if (state.isSeeking || state.generatedAudioChunks.length === 0) return;
     targetSeconds = Math.max(0, Math.min(targetSeconds, state.liveWindowEnd));
     state.isSeeking = true;
@@ -369,8 +374,12 @@ export async function seekToTime(targetSeconds) {
         if (dom.progressSlider) dom.progressSlider.value = targetSeconds;
         if (dom.timeCurrent) dom.timeCurrent.textContent = formatTime(targetSeconds);
 
-        initAudioContext({ resume: true, stopCurrent: false });
-        if (state.audioCtx.state === 'suspended') await state.audioCtx.resume();
+        initAudioContext({ resume: autoplay, stopCurrent: false });
+        if (autoplay && state.audioCtx.state === 'suspended') {
+            await state.audioCtx.resume();
+        } else if (!autoplay && state.audioCtx.state === 'running') {
+            await state.audioCtx.suspend();
+        }
         // Audio may have arrived while resume() was pending. It is already in
         // generatedAudioChunks, so rebuild the queue from that canonical cache.
         state.audioQueue = [];
@@ -408,7 +417,11 @@ export async function seekToTime(targetSeconds) {
                 },
             );
         }
-        startProgressSync();
+        if (autoplay) {
+            startProgressSync();
+        } else {
+            stopProgressSync();
+        }
         updateProgressUI();
     } finally {
         state.isSeeking = false;

@@ -1,12 +1,12 @@
-# PDFVox v1.0.0 — AI 编程助手项目指南
+# PDFVox v1.1.0 — AI 编程助手项目指南
 
-> 本文面向维护 PDFVox 的开发者与 AI 编程助手。内容以 `v1.0.0` 当前代码为准，描述真实功能、架构边界、关键状态和修改约束。
+> 本文面向维护 PDFVox 的开发者与 AI 编程助手。内容以 `v1.1.0` 当前代码为准，描述真实功能、架构边界、关键状态和修改约束。
 
 ## 1. 项目定位与版本状态
 
 PDFVox 是一个 FastAPI Web 应用，将 PDF 课件逐页转换为 AI 教授风格的流式语音讲解，并在浏览器中同步展示页面、完整句子字幕和字级朗读高亮。
 
-- 当前正式版本：`v1.0.0`
+- 当前开发版本：`v1.1.0`
 - Python 版本号来源：`app/version.py`
 - 主应用入口：`python run.py`
 - 默认地址：`http://localhost:8000`
@@ -24,7 +24,7 @@ PDFVox 是一个 FastAPI Web 应用，将 PDF 课件逐页转换为 AI 教授风
   → Web Audio API 播放并同步字幕、进度和页面
 ```
 
-## 2. v1.0.0 功能范围
+## 2. v1.1.0 功能范围
 
 ### 2.1 文档与讲解
 
@@ -60,7 +60,7 @@ PDFVox 是一个 FastAPI Web 应用，将 PDF 课件逐页转换为 AI 教授风
 
 - 支持文本问题或浏览器录音问题。
 - 浏览器录音重采样为 16 kHz 单声道 WAV；服务端使用本地 faster-whisper 转写。
-- Silero VAD 可选，加载失败时退化到 RMS 能量检测。
+- 使用 faster-whisper 内置的 ONNX Silero VAD；初始化失败时退化到 RMS 能量检测，不额外引入 PyTorch。
 - 问答会使用当前页图像、从第 1 页到当前页的已缓存讲稿和当前会话历史。
 - 每个 `file_id + session_id` 最多保留最近 5 轮问答。
 - LLM 回答文本和 TTS 回答音频通过 SSE 流式返回。
@@ -74,6 +74,16 @@ PDFVox 是一个 FastAPI Web 应用，将 PDF 课件逐页转换为 AI 教授风
 - `POST /tts`：将单段文本合成为 WAV。
 - `POST /tts/batch`：顺序处理最多 100 段文本，允许部分成功。
 
+### 2.6 Windows 桌面交付
+
+- `desktop_main.py` 在随机回环端口启动 FastAPI，并由 pywebview 承载现有界面。
+- 首次启动显示 `setup.html`，用户只需填写 LLM/TTS 两个 API Key。
+- API Key 通过 keyring 保存到 Windows 凭据管理器，接口和日志不返回密钥正文。
+- 保存密钥后原地重建 LLM/TTS 客户端，不要求用户手工重启应用。
+- 数据库、上传文件、日志和模型缓存写入 `%LOCALAPPDATA%\PDFVox`，与只读安装目录分离。
+- 桌面服务器只监听 `127.0.0.1`，使用每次启动生成的随机令牌和 HttpOnly Cookie 保护本地接口。
+- PyInstaller 使用 onedir，Inno Setup 生成可安装和卸载的 Windows 安装程序。
+
 ## 3. 技术与 API 选型
 
 | 能力 | 当前实现 |
@@ -85,7 +95,7 @@ PDFVox 是一个 FastAPI Web 应用，将 PDF 课件逐页转换为 AI 教授风
 | TTS | `websockets` 直接连接火山引擎双向 WebSocket 接口 |
 | TTS 协议 | 项目内 `protocols.py` 实现的自定义二进制协议 |
 | TTS 音频 | 24 kHz、16-bit、单声道 PCM，开启字幕时间戳 |
-| ASR | faster-whisper base，CPU int8；Silero VAD 可选 |
+| ASR | faster-whisper base，CPU int8；内置 ONNX Silero VAD |
 | PDF | pdfplumber，页面以 150 DPI PNG 渲染 |
 | 前端 | 原生 ES Module、Web Audio API、EventSource、MediaRecorder |
 | 数据 | SQLite + 文件系统 + 浏览器内存状态 |
@@ -97,8 +107,13 @@ PDFVox 是一个 FastAPI Web 应用，将 PDF 课件逐页转换为 AI 教授风
 ```text
 PDFVox/
 ├── run.py                         # 主 Web 服务启动入口
+├── desktop_main.py                 # pywebview 桌面启动入口
+├── PACKAGING.md                    # Windows 构建与发布说明
 ├── app/
 │   ├── version.py                 # 唯一版本号来源
+│   ├── paths.py                   # 源码/冻结资源与用户数据路径
+│   ├── credentials.py             # 系统凭据存储抽象
+│   ├── desktop_security.py        # 桌面会话令牌中间件
 │   ├── config.py                  # 环境变量和项目路径
 │   ├── main.py                    # 主 FastAPI 应用、页面和路由注册
 │   ├── tts_server.py              # 可独立启动的 TTS HTTP 服务
@@ -109,9 +124,11 @@ PDFVox/
 │   │   ├── upload.py              # PDF 上传与校验
 │   │   ├── pdf_view.py            # PDF 信息、文本和页面图像
 │   │   ├── ai_explain.py          # 讲解 SSE、回放、取消、状态
-│   │   └── qa.py                  # 文本/语音问答 SSE
+│   │   ├── qa.py                  # 文本/语音问答 SSE
+│   │   └── app_settings.py        # 首次配置与凭据管理接口
 │   ├── services/
 │   │   ├── runtime.py             # 路由共享的进程级服务实例
+│   │   ├── settings_service.py    # API Key 配置用例
 │   │   ├── cache.py               # 线程安全 TTL/LRU 内存缓存
 │   │   ├── explain_service.py     # 讲解编排、缓存、取消与恢复
 │   │   ├── explain_audio.py       # 页面音频生成、完整性检查与缓存
@@ -125,6 +142,7 @@ PDFVox/
 │   └── utils/logging.py           # 文件/控制台日志
 ├── web/
 │   ├── index.html                 # 上传页
+│   ├── setup.html                 # 首次启动 API Key 配置页
 │   ├── viewer.html                # 阅读、讲解和问答页
 │   ├── status.html                # 任务状态页
 │   └── static/
@@ -138,6 +156,8 @@ PDFVox/
 ├── tests/                         # 自动化测试
 ├── requirements.txt              # 运行依赖
 ├── requirements-dev.txt          # 测试依赖
+├── requirements-build.txt        # Windows 构建依赖
+├── packaging/                     # PyInstaller、Inno Setup 与构建脚本
 ├── pytest.ini                    # 仅收集 tests/
 └── .env.example                  # 配置模板
 ```
@@ -155,6 +175,8 @@ PDFVox/
 - 对同一 PDF 的上下文视图。
 
 不要在路由模块中重新实例化 `ExplainService`，否则取消令牌和缓存会分裂。
+
+首次保存或更换 API Key 后，`runtime.reconfigure_api_clients()` 只替换外部 API 客户端并保留讲稿、音频缓存和 QA 历史。
 
 ### 5.2 讲解双流
 
@@ -207,7 +229,11 @@ SQLite 位于 `${STORAGE_PATH}/pdfvox.db`，导入 `app.models.db` 时自动初�
 | GET | `/` | 上传页 |
 | GET | `/viewer.html?file_id=...` | 阅读与讲解页 |
 | GET | `/status.html` | 任务状态页 |
-| GET | `/api/health` | 返回状态、消息和 `1.0.0` 版本 |
+| GET | `/api/health` | 返回状态、消息和 `1.1.0` 版本 |
+| GET | `/setup.html` | 首次启动和 API Key 更新页 |
+| GET | `/settings/status` | 返回两个 API Key 的配置状态，不返回密钥 |
+| POST | `/settings/configure` | 仅限本机，保存两个 API Key 并重建客户端 |
+| DELETE | `/settings/credentials` | 仅限本机，清除系统凭据 |
 
 ### 6.2 上传与 PDF
 
@@ -323,9 +349,10 @@ SUMMARY_CACHE_MAX_ENTRIES=256
 AUDIO_CACHE_MAX_ENTRIES=32
 GENERATED_CACHE_MAX_ENTRIES=128
 QA_HISTORY_MAX_DOCUMENTS=100
+LOG_TO_FILE=true
 ```
 
-此外可配置 `HOST`、`PORT`、`AUTO_RELOAD`、`LOG_LEVEL` 和 `LOG_TO_CONSOLE`。相对路径统一相对于仓库根目录解析，因此可以从其他工作目录启动。
+此外可配置 `HOST`、`PORT`、`AUTO_RELOAD`、`LOG_LEVEL` 和 `LOG_TO_CONSOLE`。`LOG_TO_FILE=false` 可关闭 `log.txt`；自动化测试通过 `tests/conftest.py` 使用该设置，避免测试数据混入运行日志。相对路径统一相对于仓库根目录解析，因此可以从其他工作目录启动。
 
 不要提交真实 `.env`、API 密钥、上传文档、SQLite 数据库、生成音频或日志。
 
@@ -346,7 +373,7 @@ python run.py
 python -m pytest -q
 ```
 
-`pytest.ini` 只收集 `tests/`，避免把依赖真实麦克风、模型或外部 API 的脚本误当成自动化测试。当前 v1.0.0 基线为 27 项测试，覆盖：
+`pytest.ini` 只收集 `tests/`，避免把依赖真实麦克风、模型或外部 API 的脚本误当成自动化测试。当前测试基线为 37 项，覆盖：
 
 - API 参数与恢复生成；
 - 路径配置和 SQLite 持久缓存；
@@ -356,7 +383,7 @@ python -m pytest -q
 - 前端回放不重复扩展总时长；
 - LLM 响应兼容；
 - TTS 字幕协议和错误事件；
-- ASR 延迟加载；
+- ASR/VAD 延迟加载与无 PyTorch 推理路径；
 - QA 历史隔离和五轮上限；
 - 主应用与独立 TTS 服务版本元数据。
 

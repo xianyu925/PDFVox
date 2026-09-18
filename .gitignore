@@ -11,3 +11,7 @@ scripts/
 /log.txt
 /doc/
 /.pytest_cache/
+/.cache/
+/build/
+/dist/
+/release/

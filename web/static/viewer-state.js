@@ -24,6 +24,8 @@ export const state = {
     currentEventSource: null,
     currentStreamAbort: null,
     isQaActive: false,
+    qaReturnTime: 0,                // 进入问答前的讲解播放位置
+    qaResumeGeneration: false,      // 问答结束后是否需要恢复讲解生成流
     sessionId: sessionStorage.getItem('pdfvox_session_id') ||
         (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`),
 
